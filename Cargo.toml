@@ -1,0 +1,20 @@
+[package]
+name = "ssh2-config"
+version = "0.1.0"
+authors = ["Seth Pellegrino <seth@codecopse.net>"]
+edition = "2018"
+license = "MIT/Apache-2.0"
+keywords = ["ssh", "ssh_config"]
+readme = "README.md"
+repository = "https://github.com/sethp/ssh2-config"
+homepage = "https://github.com/sethp/ssh2-config"
+# documentation = "https://docs.rs/ssh2-config"
+description = """
+A configuration wrapper for ssh2-rs 
+"""
+
+[dependencies]
+ssh2 = { path = "../ssh2-rs", version = "0.8.1" }
+
+[dev-dependencies]
+tempdir = "0.3.7"
