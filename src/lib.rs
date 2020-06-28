@@ -14,7 +14,7 @@
 // TODO
 // #![doc(html_root_url = "https://docs.rs/ssh2-config")]
 // #![deny(missing_docs, unused_results)]
-// #![cfg_attr(test, deny(warnings))]
+#![cfg_attr(test, deny(warnings))]
 
 // https://man.openbsd.org/OpenBSD-current/man5/ssh_config.5
 
@@ -35,18 +35,18 @@ impl SSHConfig {
 }
 
 #[cfg_attr(test, derive(PartialEq, Eq, Debug))]
-pub enum SSHOption {
-    User(String),
+pub enum SSHOption<'a> {
+    User(&'a str),
     Port(u16),
 
     // Most things, right now
-    Unknown(String, String),
+    Unknown(&'a str, &'a str),
 }
 
 // TODO: line + file info?
 #[derive(Debug)]
-pub enum Error {
-    TrailingGarbage(String),
+pub enum Error<'a> {
+    TrailingGarbage(&'a str),
 
     InvalidPort(std::num::ParseIntError),
 }
@@ -54,7 +54,7 @@ pub enum Error {
 use std::error;
 use std::fmt;
 
-impl fmt::Display for Error {
+impl<'a> fmt::Display for Error<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             Error::TrailingGarbage(ref garbage) => write!(f, "garbage at end of line: {}", garbage),
@@ -64,32 +64,29 @@ impl fmt::Display for Error {
     }
 }
 
-impl error::Error for Error {}
+impl<'a> error::Error for Error<'a> {}
 
-type Result<T> = std::result::Result<T, Error>;
+type Result<'a, T> = std::result::Result<T, Error<'a>>;
 
-impl SSHOption {
-    pub fn parse(s: String) -> Result<Option<SSHOption>> {
-        match parse_line(s)? {
-            None => Ok(None),
-            Some(v) => do_the_inner_thing(v).map(Option::from),
-        }
+impl<'a> SSHOption<'a> {
+    pub fn parse(s: &'a str) -> Result<'a, Option<SSHOption<'a>>> {
+        parse_line(&s)
     }
 }
 
-fn do_the_inner_thing(opt: (String, String)) -> Result<SSHOption> {
+fn do_the_inner_thing<'a>(keyword: &'a str, opt: &'a str) -> Result<'a, SSHOption<'a>> {
     use SSHOption::*;
-    match opt.0.as_str() {
-        "user" => Ok(User(opt.1)),
-        "port" => Ok(Port(opt.1.parse().map_err(Error::InvalidPort)?)), // TODO: getservbyname
-        _ => Ok(Unknown(opt.0, opt.1)),
+    match keyword {
+        "user" => Ok(User(opt)),
+        "port" => Ok(Port(opt.parse().map_err(Error::InvalidPort)?)), // TODO: getservbyname
+        _ => Ok(Unknown(keyword, opt)),
     }
 }
 
 // The rule is that we can accept ssh configs openssh won't (even invalid or broken ones),
 // but we can't reject any that it would accept.
 // https://github.com/openssh/openssh-portable/blob/14beca57ac92d62830c42444c26ba861812dc837/readconf.c#L892
-fn parse_line(s: String) -> Result<Option<(String, String)>> {
+fn parse_line<'a>(s: &'a str) -> Result<'a, Option<SSHOption<'a>>> {
     let s = s.trim_start_matches(WHITESPACE);
     if s.starts_with("#") {
         return Ok(None);
@@ -101,11 +98,8 @@ fn parse_line(s: String) -> Result<Option<(String, String)>> {
 
     match parts.as_slice() {
         [] => Ok(None),
-        [keyword, value] => Ok(Some((
-            keyword.to_lowercase().to_string(),
-            value.to_string(),
-        ))),
-        [.., garbage] => Err(Error::TrailingGarbage(garbage.to_string())),
+        [keyword, value] => Ok(Some(do_the_inner_thing(keyword, value)?)),
+        [.., garbage] => Err(Error::TrailingGarbage(garbage)),
     }
 }
 
@@ -118,27 +112,28 @@ const EOL_WHITESPACE: &[char] = &[' ', '\t', '\r', '\n', '\x0c' /* form feed */]
 
 #[test]
 fn it_works() {
+    use SSHOption::*;
     assert_eq!(
-        parse_line("=# some comment\r\n".to_string()).expect("parse failed"),
+        parse_line("=# some comment\r\n").expect("parse failed"),
         None
     );
 
     assert_eq!(
-        parse_line("user seth".to_string())
+        parse_line("user seth")
             .expect("parse failed")
             .expect("expected value"),
-        ("user".to_string(), "seth".to_string())
+        User("seth")
     );
     assert_eq!(
-        parse_line("user seth\r\n".to_string())
+        parse_line("user seth\r\n")
             .expect("parse failed")
             .expect("expected value"),
-        ("user".to_string(), "seth".to_string())
+        User("seth")
     );
     assert_eq!(
         format!(
             "{}",
-            parse_line("user seth zzz\r\n".to_string()).expect_err("parse should have failed")
+            parse_line("user seth zzz\r\n").expect_err("parse should have failed")
         ),
         "garbage at end of line: zzz"
     );
@@ -151,23 +146,23 @@ mod tests {
     #[test]
     fn it_works() {
         assert_eq!(
-            SSHOption::parse("user dusty".to_owned())
+            SSHOption::parse("user dusty")
                 .expect("parse failed")
                 .expect("expected value"),
-            SSHOption::User("dusty".to_owned())
+            SSHOption::User("dusty")
         )
     }
 
     #[test]
     fn it_works2() {
         assert_eq!(
-            SSHOption::parse("port 22".to_owned())
+            SSHOption::parse("port 22")
                 .expect("parse failed")
                 .expect("expected value"),
             SSHOption::Port(22)
         );
 
-        SSHOption::parse("port 222222".to_owned()).expect_err("parse should have failed");
-        SSHOption::parse("port zz".to_owned()).expect_err("parse should have failed");
+        SSHOption::parse("port 222222").expect_err("parse should have failed");
+        SSHOption::parse("port zz").expect_err("parse should have failed");
     }
 }
