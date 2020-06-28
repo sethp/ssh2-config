@@ -27,13 +27,7 @@ fn hello_world2() {
 
     let mut lines = io::BufReader::new(child.stdout.expect("no stdout")).lines();
 
-    assert_eq!(lines.next().unwrap().unwrap(), "user seth")
-
-    // io::Lines<io::BufReader
-    //
-    // assert!(output.status.success());
-    // io::stdout().write_all(&output.stdout).unwrap();
-    // io::stderr().write_all(&output.stderr).unwrap();
+    assert_eq!(lines.nth(1).unwrap().unwrap(), "hostname example.com")
 }
 
 #[test]
@@ -52,7 +46,7 @@ fn hello_world3() {
 
     let mut lines = io::BufReader::new(child.stdout.expect("no stdout")).lines();
 
-    assert_eq!(lines.next().unwrap().unwrap(), "user eve")
+    assert_eq!(lines.nth(0).unwrap().unwrap(), "user eve")
 }
 
 #[test]
@@ -71,7 +65,7 @@ fn hello_world4() {
 
     let mut lines = io::BufReader::new(child.stdout.expect("no stdout")).lines();
 
-    assert_eq!(lines.next().unwrap().unwrap(), "user seth")
+    assert_eq!(lines.nth(1).unwrap().unwrap(), "hostname example.com")
 }
 
 #[test]
@@ -90,5 +84,5 @@ fn hello_world5() {
 
     let mut lines = io::BufReader::new(child.stdout.expect("no stdout")).lines();
 
-    assert_eq!(lines.next().unwrap().unwrap(), "user seth")
+    assert_eq!(lines.nth(1).unwrap().unwrap(), "hostname example.com")
 }
