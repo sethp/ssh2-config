@@ -196,6 +196,16 @@ mod tests {
     }
 
     #[test]
+    fn case_insensitive() {
+        assert_eq!(
+            SSHOption::parse("PoRt 22")
+                .expect("parse failed")
+                .expect("expected value"),
+            SSHOption::Port(22)
+        )
+    }
+
+    #[test]
     fn it_works2() {
         assert_eq!(
             SSHOption::parse("port 22")
