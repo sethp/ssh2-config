@@ -15,15 +15,22 @@ jobs:
           - stable
           - beta
           - nightly
-          - 1.42.0  # MSRV
+          - msrv # Minimum Supported Rust Version, see below
 
     steps:
       - uses: actions/checkout@v2
 
+      - uses: haya14busa/action-cond@v1
+        id: toolchain
+        with:
+          cond: ${{ matrix.rust == 'msrv' }}
+          if_true: 1.42.0
+          if_false: ${{ matrix.rust }}
+
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: ${{ matrix.rust }}
+          toolchain: ${{ steps.toolchain.outputs.value }}
           override: true
           components: rustfmt, clippy
 
