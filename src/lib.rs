@@ -88,7 +88,7 @@ fn do_the_inner_thing<'a, 'b>(keyword: &'b str, opt: &'a str) -> Result<'a, SSHO
 // The rule is that we can accept ssh configs openssh won't (even invalid or broken ones),
 // but we can't reject any that it would accept.
 // https://github.com/openssh/openssh-portable/blob/14beca57ac92d62830c42444c26ba861812dc837/readconf.c#L892
-fn parse_line<'a>(s: &'a str) -> Result<'a, Option<SSHOption<'a>>> {
+fn parse_line<'a>(s: &'a str) -> Result<'_, Option<SSHOption<'a>>> {
     let mut is_quoted = false;
     // TODO: how to deal with an internal `"`, as in foo" bar" (should parse to -> `foo bar`)
     // Seems to require either:
@@ -125,7 +125,7 @@ fn parse_line<'a>(s: &'a str) -> Result<'a, Option<SSHOption<'a>>> {
     match parts.as_slice() {
         [..] if is_quoted => Err(Error::UnmatchedQuote),
         [] => Ok(None),
-        [word, ..] if word.starts_with("#") => Ok(None),
+        [word, ..] if word.starts_with('#') => Ok(None),
         [keyword, value] => Ok(Some(do_the_inner_thing(&keyword.to_lowercase(), value)?)),
         [.., garbage] => Err(Error::TrailingGarbage(garbage)),
     }
