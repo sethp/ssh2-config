@@ -55,7 +55,7 @@ pub enum Error {
 use std::error;
 use std::fmt;
 
-impl<'a> fmt::Display for Error {
+impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             Error::UnmatchedQuote => write!(f, "no matching `\"` found"),
@@ -71,7 +71,7 @@ impl error::Error for Error {}
 type Result<T> = std::result::Result<T, Error>;
 
 impl SSHOption {
-    pub fn parse<'a>(s: &'a str) -> Result<Option<SSHOption>> {
+    pub fn parse(s: &str) -> Result<Option<SSHOption>> {
         parse_line(&s)
     }
 }
@@ -88,7 +88,7 @@ fn do_the_inner_thing<'a, 'b>(keyword: &'a str, opt: &'b str) -> Result<SSHOptio
 // The rule is that we can accept ssh configs openssh won't (even invalid or broken ones),
 // but we can't reject any that it would accept.
 // https://github.com/openssh/openssh-portable/blob/14beca57ac92d62830c42444c26ba861812dc837/readconf.c#L892
-fn parse_line<'a>(s: &'a str) -> Result<Option<SSHOption>> {
+fn parse_line(s: &str) -> Result<Option<SSHOption>> {
     let mut is_quoted = false;
     // TODO: how to deal with an internal `"`, as in foo" bar" (should parse to -> `foo bar`)
     // Seems to require either:
@@ -125,7 +125,7 @@ fn parse_line<'a>(s: &'a str) -> Result<Option<SSHOption>> {
     match parts.as_slice() {
         [..] if is_quoted => Err(Error::UnmatchedQuote),
         [] => Ok(None),
-        [word, ..] if word.starts_with("#") => Ok(None),
+        [word, ..] if word.starts_with('#') => Ok(None),
         [keyword, value] => Ok(Some(do_the_inner_thing(keyword, value)?)),
         [.., garbage] => Err(Error::TrailingGarbage(garbage.to_string())),
     }
