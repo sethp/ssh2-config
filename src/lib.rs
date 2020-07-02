@@ -35,19 +35,19 @@ impl SSHConfig {
 }
 
 #[cfg_attr(test, derive(PartialEq, Eq, Debug))]
-pub enum SSHOption<'a> {
-    User(&'a str),
+pub enum SSHOption {
+    User(String),
     Port(u16),
 
     // Most things, right now
-    Unknown(String, &'a str),
+    Unknown(String, String),
 }
 
 // TODO: line + file info?
 #[derive(Debug)]
-pub enum Error<'a> {
+pub enum Error {
     UnmatchedQuote,
-    TrailingGarbage(&'a str),
+    TrailingGarbage(String),
 
     InvalidPort(std::num::ParseIntError),
 }
@@ -55,7 +55,7 @@ pub enum Error<'a> {
 use std::error;
 use std::fmt;
 
-impl<'a> fmt::Display for Error<'a> {
+impl<'a> fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             Error::UnmatchedQuote => write!(f, "no matching `\"` found"),
@@ -66,29 +66,29 @@ impl<'a> fmt::Display for Error<'a> {
     }
 }
 
-impl<'a> error::Error for Error<'a> {}
+impl error::Error for Error {}
 
-type Result<'a, T> = std::result::Result<T, Error<'a>>;
+type Result<T> = std::result::Result<T, Error>;
 
-impl<'a> SSHOption<'a> {
-    pub fn parse(s: &'a str) -> Result<'a, Option<SSHOption<'a>>> {
+impl SSHOption {
+    pub fn parse<'a>(s: &'a str) -> Result<Option<SSHOption>> {
         parse_line(&s)
     }
 }
 
-fn do_the_inner_thing<'a, 'b>(keyword: &'b str, opt: &'a str) -> Result<'a, SSHOption<'a>> {
+fn do_the_inner_thing<'a, 'b>(keyword: &'a str, opt: &'b str) -> Result<SSHOption> {
     use SSHOption::*;
-    match keyword {
-        "user" => Ok(User(opt)),
+    match keyword.to_ascii_lowercase().as_str() {
+        "user" => Ok(User(opt.to_owned())),
         "port" => Ok(Port(opt.parse().map_err(Error::InvalidPort)?)), // TODO: getservbyname
-        _ => Ok(Unknown(keyword.to_owned(), opt)),
+        _ => Ok(Unknown(keyword.to_owned(), opt.to_owned())),
     }
 }
 
 // The rule is that we can accept ssh configs openssh won't (even invalid or broken ones),
 // but we can't reject any that it would accept.
 // https://github.com/openssh/openssh-portable/blob/14beca57ac92d62830c42444c26ba861812dc837/readconf.c#L892
-fn parse_line<'a>(s: &'a str) -> Result<'a, Option<SSHOption<'a>>> {
+fn parse_line<'a>(s: &'a str) -> Result<Option<SSHOption>> {
     let mut is_quoted = false;
     // TODO: how to deal with an internal `"`, as in foo" bar" (should parse to -> `foo bar`)
     // Seems to require either:
@@ -126,8 +126,8 @@ fn parse_line<'a>(s: &'a str) -> Result<'a, Option<SSHOption<'a>>> {
         [..] if is_quoted => Err(Error::UnmatchedQuote),
         [] => Ok(None),
         [word, ..] if word.starts_with("#") => Ok(None),
-        [keyword, value] => Ok(Some(do_the_inner_thing(&keyword.to_lowercase(), value)?)),
-        [.., garbage] => Err(Error::TrailingGarbage(garbage)),
+        [keyword, value] => Ok(Some(do_the_inner_thing(keyword, value)?)),
+        [.., garbage] => Err(Error::TrailingGarbage(garbage.to_string())),
     }
 }
 
@@ -152,25 +152,25 @@ fn it_works() {
         parse_line("user seth")
             .expect("parse failed")
             .expect("expected value"),
-        User("seth")
+        User(String::from("seth"))
     );
     assert_eq!(
         parse_line("user seth\r\n")
             .expect("parse failed")
             .expect("expected value"),
-        User("seth")
+        User(String::from("seth"))
     );
     assert_eq!(
         parse_line("\"user\" seth")
             .expect("parse failed")
             .expect("expected value"),
-        User("seth")
+        User(String::from("seth"))
     );
     assert_eq!(
         parse_line("\"user\" \"seth\"")
             .expect("parse failed")
             .expect("expected value"),
-        User("seth")
+        User(String::from("seth"))
     );
     assert_eq!(
         format!(
@@ -191,7 +191,7 @@ mod tests {
             SSHOption::parse("user dusty")
                 .expect("parse failed")
                 .expect("expected value"),
-            SSHOption::User("dusty")
+            SSHOption::User(String::from("dusty"))
         )
     }
 
@@ -236,7 +236,7 @@ mod tests {
             SSHOption::parse("user \"one two\"")
                 .expect("parse failed")
                 .expect("expected value"),
-            SSHOption::User("one two")
+            SSHOption::User(String::from("one two"))
         );
         SSHOption::parse("user \"hi").expect_err("parse should have failed");
     }
@@ -254,7 +254,7 @@ mod tests {
             SSHOption::parse("user one\" two\"")
                 .expect("parse failed")
                 .expect("expected value"),
-            SSHOption::User("one two")
+            SSHOption::User(String::from("one two"))
         );
 
         SSHOption::parse("user one\" \"two").expect_err("parse should have failed");
