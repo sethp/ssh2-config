@@ -14,7 +14,7 @@ A configuration wrapper for ssh2-rs
 """
 
 [dependencies]
-ssh2 = { path = "../ssh2-rs", version = "0.8.1" }
+ssh2 = "0.8.1"
 
 [dev-dependencies]
 tempdir = "0.3.7"
