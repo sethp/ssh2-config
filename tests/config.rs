@@ -2,7 +2,7 @@ use std::fs;
 use std::io;
 use std::io::{BufRead, Write};
 use std::process::{Command, Stdio};
-use tempdir::TempDir;
+use tempfile::tempdir;
 
 #[test]
 fn hello_world() {
@@ -34,7 +34,7 @@ fn hello_world2() {
 
 #[test]
 fn hello_world3() {
-    let dir = TempDir::new("foobar").unwrap();
+    let dir = tempdir().unwrap();
     let cfg_file = dir.path().join("hello_world3_config");
     // this is weird, but ??
     fs::write(&cfg_file, r#"=user eve"#).expect("failed writing config");
@@ -55,7 +55,7 @@ fn hello_world3() {
 
 #[test]
 fn hello_world4() {
-    let dir = TempDir::new("foobar").unwrap();
+    let dir = tempdir().unwrap();
     let cfg_file = dir.path().join("hello_world3_config");
     // this is weird, but ??
     fs::write(&cfg_file, r#"=# comment"#).expect("failed writing config");
@@ -75,7 +75,7 @@ fn hello_world4() {
 
 #[test]
 fn hello_world5() {
-    let dir = TempDir::new("foobar").unwrap();
+    let dir = tempdir().unwrap();
     let cfg_file = dir.path().join("hello_world3_config");
     // this is weird, but ??
     fs::write(&cfg_file, r#"=# comment"#).expect("failed writing config");
@@ -96,7 +96,7 @@ fn hello_world5() {
 
 #[test]
 fn quoted_token_config() {
-    let dir = TempDir::new("foobar").unwrap();
+    let dir = tempdir().unwrap();
     let cfg_file = dir.path().join("hello_world6_config");
     // this is valid, but `hello" "world is not
     fs::write(
@@ -123,7 +123,7 @@ fn quoted_token_config() {
 
 #[test]
 fn multi_line_quoted_token_fails() {
-    let dir = TempDir::new("foobar").unwrap();
+    let dir = tempdir().unwrap();
     let cfg_file = dir.path().join("multi_line_quoted_token_config");
     fs::write(
         &cfg_file,

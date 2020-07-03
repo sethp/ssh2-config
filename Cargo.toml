@@ -17,4 +17,4 @@ A configuration wrapper for ssh2-rs
 ssh2 = "0.8.1"
 
 [dev-dependencies]
-tempdir = "0.3.7"
+tempfile = "3.1.0"
