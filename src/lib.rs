@@ -16,6 +16,11 @@
 // #![deny(missing_docs, unused_results)]
 #![cfg_attr(test, deny(warnings))]
 
+pub mod option;
+
+#[macro_use]
+extern crate lazy_static;
+
 // https://man.openbsd.org/OpenBSD-current/man5/ssh_config.5
 
 pub struct SSHConfig {}
@@ -131,12 +136,22 @@ fn parse_line(s: &str) -> Result<Option<SSHOption>> {
     }
 }
 
+// OK, so, ideas:
+// 1. Build custom splitter. Not too hard to imagine doing, but unicode handling means I may need or want `unsafe`
+// 2. Use the regex crate. But, without lookaround, can I split on the empty string just before a quote?
+
+// Goals:
+// Produces a finite length result (a la splitn), maybe even
+// Slice pattern matching against ^ ?
+// Except in relevant arms of the match, avoid allocating a String (how important is this? benchmark?)
+
 // https://github.com/openssh/openssh-portable/blob/e073106f370cdd2679e41f6f55a37b491f0e82fe/misc.c#L323-L325
 const WHITESPACE: &[char] = &[
     ' ', '\t', '\r', '\n', /* for convenience, treat as blank */ '=',
 ];
 const QUOTE: char = '"';
 
+// https://github.com/openssh/openssh-portable/blob/14beca57ac92d62830c42444c26ba861812dc837/readconf.c#L916-L923
 const EOL_WHITESPACE: &[char] = &[' ', '\t', '\r', '\n', '\x0c' /* form feed */];
 
 #[test]
@@ -258,5 +273,26 @@ mod tests {
         );
 
         SSHOption::parse("user one\" \"two").expect_err("parse should have failed");
+    }
+
+    #[test]
+    fn result_and_option() -> Result<(), &'static str> {
+        // Idea: turn a collection(?) of Result<Option<T>, E> into Result<Vec<T>, Vec<E>> ?
+        // intuition is that having a big old thing of lines, we want to map ::parse over them
+        // and then discard the empties
+        // use std::iter::FromIterator;
+        // use std::iter::process_results;
+        use itertools::{Itertools, Either};
+
+        let input: Vec<Result<Option<i32>, &'static str>> =
+            vec![Ok(Some(1)), Ok(Some(2)), Ok(None), Ok(Some(3)), Err("sup dawg")];
+
+        let out: Vec<Option<_>> = Result::from_iter(input)?;
+        assert_eq!(
+            out.iter().filter_map(|e| *e).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+
+        Ok(())
     }
 }
