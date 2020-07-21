@@ -280,12 +280,16 @@ mod tests {
         // Idea: turn a collection(?) of Result<Option<T>, E> into Result<Vec<T>, Vec<E>> ?
         // intuition is that having a big old thing of lines, we want to map ::parse over them
         // and then discard the empties
-        // use std::iter::FromIterator;
-        // use std::iter::process_results;
-        use itertools::{Itertools, Either};
+        use std::iter::FromIterator;
+        // use itertools::{Itertools, Either};
 
-        let input: Vec<Result<Option<i32>, &'static str>> =
-            vec![Ok(Some(1)), Ok(Some(2)), Ok(None), Ok(Some(3)), Err("sup dawg")];
+        let input: Vec<Result<Option<i32>, &'static str>> = vec![
+            Ok(Some(1)),
+            Ok(Some(2)),
+            Ok(None),
+            Ok(Some(3)),
+            // Err("sup dawg"),
+        ];
 
         let out: Vec<Option<_>> = Result::from_iter(input)?;
         assert_eq!(
