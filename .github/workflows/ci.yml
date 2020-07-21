@@ -24,7 +24,7 @@ jobs:
         id: toolchain
         with:
           cond: ${{ matrix.rust == 'msrv' }}
-          if_true: 1.42.0
+          if_true: 1.44.1
           if_false: ${{ matrix.rust }}
 
       - uses: actions-rs/toolchain@v1
