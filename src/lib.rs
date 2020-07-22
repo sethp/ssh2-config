@@ -2,7 +2,7 @@
 //! use ssh2::Session;
 //! use ssh2_config::SSHConfig;
 //!
-//! // Connect to the local SSH server
+//! // Retrieve config for local SSH server
 //! let sess = SSHConfig::for_host("127.0.0.1")
 //!                 .with_config_file("/path/to/ssh/config") // equivalent to OpenSSH's `-F`
 //!                 .connect_with_auth();
@@ -135,15 +135,6 @@ fn parse_line(s: &str) -> Result<Option<SSHOption>> {
         [.., garbage] => Err(Error::TrailingGarbage(garbage.to_string())),
     }
 }
-
-// OK, so, ideas:
-// 1. Build custom splitter. Not too hard to imagine doing, but unicode handling means I may need or want `unsafe`
-// 2. Use the regex crate. But, without lookaround, can I split on the empty string just before a quote?
-
-// Goals:
-// Produces a finite length result (a la splitn), maybe even
-// Slice pattern matching against ^ ?
-// Except in relevant arms of the match, avoid allocating a String (how important is this? benchmark?)
 
 // https://github.com/openssh/openssh-portable/blob/e073106f370cdd2679e41f6f55a37b491f0e82fe/misc.c#L323-L325
 const WHITESPACE: &[char] = &[

@@ -87,7 +87,7 @@ fn test_parse_always_alloc() {
     parse_always_alloc("h\"ello\"\"\" world").expect_err("wanted parse error");
 }
 
-use crate::{EOL_WHITESPACE, WHITESPACE};
+use crate::{EOL_WHITESPACE, QUOTE, WHITESPACE};
 
 pub fn parse_regex_onig_split<T, F>(line: &str, f: F) -> Result<T, &'static str>
 where
@@ -454,6 +454,10 @@ use std::iter::Peekable;
 use std::str::MatchIndices;
 // TODO: Tokens/TokensInternal?
 
+/// An iterator of [`Token`]s created with the method [`tokens`].
+///
+/// [`Token`]: crate::option::Token
+/// [`tokens`]: crate::option::tokens
 #[derive(Debug)]
 pub struct Tokens<'a> {
     line: &'a str,
@@ -465,6 +469,12 @@ pub struct Tokens<'a> {
 }
 
 impl<'a> Tokens<'a> {
+    // https://github.com/openssh/openssh-portable/blob/e073106f370cdd2679e41f6f55a37b491f0e82fe/misc.c#L323-L325
+    // todo docs: removed \r \n
+    const DELIMITERS: &'static [char] = &[
+        ' ', '\t', '=', /* for convenience, treat as blank, even when there's more than one */
+    ];
+
     // TODO: more kinds of blanks
     // const CHARS: &'static [char] = &[' '];
 }
@@ -473,27 +483,32 @@ impl<'a> Iterator for Tokens<'a> {
     type Item = Token<'a>;
 
     fn next(&mut self) -> Option<Token<'a>> {
-        if let Some((_, ' ')) = self.chars.peek() {
-            while let Some((i, ' ')) = self.chars.peek() {
-                self.last = Some(i + ' '.len_utf8());
+        let (_, ch) = self.chars.peek()?;
+        if Tokens::DELIMITERS.contains(ch) {
+            while let Some((i, ch)) = self.chars.peek() {
+                if !Tokens::DELIMITERS.contains(ch) {
+                    break;
+                }
+                self.last = Some(i + ch.len_utf8());
                 self.chars.next();
             }
             return Some(Token::Delim);
         }
         let start = self.last.unwrap_or(0);
-        if let Some((_, '"')) = self.chars.peek() {
-            let start = start + '"'.len_utf8();
+        if *ch == QUOTE {
+            let start = start + QUOTE.len_utf8();
             self.chars.next();
             while let Some((_, ch)) = self.chars.peek() {
-                if *ch == '"' {
+                // TODO: test and/or docs
+                if *ch == QUOTE || *ch == '\n' || *ch == '\r' {
                     break;
                 }
                 self.chars.next();
             }
-            if let Some((i, '"')) = self.chars.peek() {
+            if let Some((i, QUOTE)) = self.chars.peek() {
                 let end = *i;
                 self.chars.next();
-                self.last = Some(end + '"'.len_utf8());
+                self.last = Some(end + QUOTE.len_utf8());
                 return Some(Token::Quoted(&self.line[start..end]));
             } else {
                 self.last = Some(self.line.len());
@@ -502,14 +517,13 @@ impl<'a> Iterator for Tokens<'a> {
         }
         let mut end = self.line.len();
         while let Some((i, ch)) = self.chars.peek() {
-            if *ch == ' ' || *ch == '"' {
+            if Tokens::DELIMITERS.contains(ch) || *ch == QUOTE {
                 end = *i;
                 break;
             }
             self.chars.next();
         }
         self.last = Some(end);
-        // TODO: empty quoted tokens?
         if start < end {
             Some(Token::Word(&self.line[start..end]))
         } else {
@@ -518,8 +532,46 @@ impl<'a> Iterator for Tokens<'a> {
     }
 }
 
-// TODO for pub: what happens if it's multiple lines?
-pub fn tokens<'a>(line: &'a str) -> Tokens {
+/// `tokens` converts a string into an iterator of [`Token`s], intended for use with [`str::lines`].
+///
+/// [`Token`s]: crate::option::Token
+/// [`str::lines`]: https://doc.rust-lang.org/std/primitive.str.html#method.lines
+///
+/// ```
+/// use ssh2_config::option::{tokens, Token};
+///
+/// assert_eq!(
+///     tokens(r#"key="value""#)
+///         .collect::<Vec<_>>(),
+///     vec![Token::Word("key"), Token::Delim, Token::Quoted("value")]
+/// );
+///
+/// assert_eq!(
+///     tokens(r#"  key  =  val"ue""#)
+///         .collect::<Vec<_>>(),
+///     vec![Token::Word("key"), Token::Delim, Token::Word("val"), Token::Quoted("ue")]
+/// );
+/// ```
+///
+/// # A note on multi-line strings
+///
+/// No ssh option can span multiple lines, so it's best to split before tokenizing each line individually
+/// in order to ensure proper handling of "end of line" blank delimiters like carriage returns and line feeds.
+///
+/// ```
+/// use ssh2_config::option;
+/// use ssh2_config::option::Token;
+///
+/// assert_eq!(
+///     "hello\x0c\nworld"
+///         .lines()
+///         .flat_map(option::tokens)
+///         .collect::<Vec<_>>(),
+///     vec![Token::Word("hello"), Token::Word("world")]
+/// );
+/// ```
+///
+pub fn tokens(line: &str) -> Tokens {
     let line = line
         .trim_start_matches(WHITESPACE)
         .trim_end_matches(EOL_WHITESPACE);
@@ -563,6 +615,33 @@ fn test_tokens() {
         vec![Invalid("w1")],
     );
     assert_eq!(tokens("\"\"").take(5).collect::<Vec<_>>(), vec![Quoted("")],);
+
+    assert_eq!(
+        tokens("key=val").take(4).collect::<Vec<_>>(),
+        vec![Word("key"), Delim, Word("val")]
+    );
+
+    assert_eq!(
+        tokens("hello\n=world").take(3).collect::<Vec<_>>(),
+        vec![Word("hello\n"), Delim, Word("world")]
+    );
+}
+
+#[test]
+fn test_tokens_multiline() {
+    use Token::*;
+
+    assert_eq!(
+        tokens("hello\x0c\nworld\x0c\n").take(3).collect::<Vec<_>>(),
+        vec![Word("hello\x0c\nworld")],
+        r#"
+        As no ssh option can span multiple lines, `tokens` expects to operate on lines individually,
+         so we currently look for "end of line" characters to be treated as any normal "word"
+         character, unless they appear at the end of the input. See the docs for `tokens` for more
+         examples on usage.
+
+         Note: this test is more descriptive than normative."#
+    )
 }
 
 pub fn parse_tokens<T, F>(line: &str, f: F) -> Result<T, &'static str>
