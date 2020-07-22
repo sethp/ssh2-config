@@ -231,7 +231,7 @@ fn test_tokens_multiline() {
          character, unless they appear at the end of the input. See the docs for `tokens` for more
          examples on usage.
 
-         Note: this test is more descriptive than normative."#
+         Note: this test is intended to be more descriptive than normative."#
     )
 }
 
