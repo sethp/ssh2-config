@@ -3,6 +3,69 @@ use std::iter::Peekable;
 #[allow(unused)]
 use std::str::MatchIndices;
 
+/// Accepts a line and calls the provided closure with exactly one tokenized option.
+///
+/// It normalizes the tokens into a canonical representation by handling quoted segments
+/// and lower-casing the key:
+///
+/// ```
+/// use ssh2_config::option::parse_tokens;
+///
+/// parse_tokens(r#"OPTION "Hello There""#, |opt, val| {
+///     assert_eq!(opt, "option");
+///     assert_eq!(val, "Hello There");
+/// });
+/// ```
+///
+/// Note that, since all of the known ssh option keywords are exclusively in the ASCII character space,
+/// we avoid handling of arbitrary unicode code points in the key portion of the line.
+///
+/// Note also that there are some unexpected arrangements of tokens that ssh will accept. For more
+/// information on these, see [TODO].
+///
+/// [TODO]: link to the parse / FromStr impl?
+pub fn parse_tokens<T, F>(line: &str, f: F) -> Result<T, &'static str>
+where
+    F: FnOnce(&str, &str) -> T,
+{
+    use Token::*;
+
+    let mut toks = [Delim; 6 /* one longer than the longest valid pattern */];
+    // with thanks to the collect_slice crate
+    let n = toks
+        .iter_mut()
+        .zip(tokens(line))
+        .fold(0, |count, (dest, item)| {
+            *dest = item;
+            count + 1
+        });
+
+    match toks[..n] {
+        [Word(key), Delim, Word(val)]
+        | [Word(key), Delim, Quoted(val)]
+        | [Quoted(key), Delim, Word(val)]
+        | [Quoted(key), Delim, Quoted(val)] => {
+            let k = key.to_ascii_lowercase();
+            Ok(f(&k, val))
+        }
+        [Word(k1), Quoted(k2), Delim, Word(val)] | [Word(k1), Quoted(k2), Delim, Quoted(val)] => {
+            let k = format!("{}{}", k1, k2).to_ascii_lowercase();
+            Ok(f(&k, val))
+        }
+        [Word(key), Delim, Word(v1), Quoted(v2)] | [Quoted(key), Delim, Word(v1), Quoted(v2)] => {
+            let k = key.to_ascii_lowercase();
+            let v = format!("{}{}", v1, v2);
+            Ok(f(&k, &v))
+        }
+        [Word(k1), Quoted(k2), Delim, Word(v1), Quoted(v2)] => {
+            let k = format!("{}{}", k1, k2).to_ascii_lowercase();
+            let v = format!("{}{}", v1, v2);
+            Ok(f(&k, &v))
+        }
+        [..] => Err("bad input"),
+    }
+}
+
 // TODO docs
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Token<'a> {
@@ -173,191 +236,130 @@ pub fn tokens(line: &str) -> Tokens {
     }
 }
 
-#[test]
-fn test_tokens() {
-    use Token::*;
-    assert_eq!(tokens("").take(2).collect::<Vec<_>>(), vec![]);
-    assert_eq!(tokens("key").take(3).collect::<Vec<_>>(), vec![Word("key")]);
-    assert_eq!(
-        tokens("key val").take(4).collect::<Vec<_>>(),
-        vec![Word("key"), Delim, Word("val")]
-    );
-    assert_eq!(
-        tokens("=key val").take(4).collect::<Vec<_>>(),
-        vec![Word("key"), Delim, Word("val")]
-    );
-    assert_eq!(
-        tokens("key    val").take(5).collect::<Vec<_>>(),
-        vec![Word("key"), Delim, Word("val")],
-        "iterator should collapse repeated blanks into a single Delim token",
-    );
-    assert_eq!(
-        tokens("key    \"val\"").take(5).collect::<Vec<_>>(),
-        vec![Word("key"), Delim, Quoted("val")],
-    );
-    assert_eq!(
-        tokens("w1\"w2\"").take(5).collect::<Vec<_>>(),
-        vec![Word("w1"), Quoted("w2")],
-    );
-    assert_eq!(
-        tokens("\"w1").take(5).collect::<Vec<_>>(),
-        vec![Invalid("w1")],
-    );
-    assert_eq!(tokens("\"\"").take(5).collect::<Vec<_>>(), vec![Quoted("")],);
+#[cfg(test)]
+mod test {
+    use super::Token::*;
+    use super::{parse_tokens, tokens};
 
-    assert_eq!(
-        tokens("key=val").take(4).collect::<Vec<_>>(),
-        vec![Word("key"), Delim, Word("val")]
-    );
+    #[test]
+    fn test_tokens() {
+        assert_eq!(tokens("").take(2).collect::<Vec<_>>(), vec![]);
+        assert_eq!(tokens("key").take(3).collect::<Vec<_>>(), vec![Word("key")]);
+        assert_eq!(
+            tokens("key val").take(4).collect::<Vec<_>>(),
+            vec![Word("key"), Delim, Word("val")]
+        );
+        assert_eq!(
+            tokens("=key val").take(4).collect::<Vec<_>>(),
+            vec![Word("key"), Delim, Word("val")]
+        );
+        assert_eq!(
+            tokens("key    val").take(5).collect::<Vec<_>>(),
+            vec![Word("key"), Delim, Word("val")],
+            "iterator should collapse repeated blanks into a single Delim token",
+        );
+        assert_eq!(
+            tokens("key    \"val\"").take(5).collect::<Vec<_>>(),
+            vec![Word("key"), Delim, Quoted("val")],
+        );
+        assert_eq!(
+            tokens("w1\"w2\"").take(5).collect::<Vec<_>>(),
+            vec![Word("w1"), Quoted("w2")],
+        );
+        assert_eq!(
+            tokens("\"w1").take(5).collect::<Vec<_>>(),
+            vec![Invalid("w1")],
+        );
+        assert_eq!(tokens("\"\"").take(5).collect::<Vec<_>>(), vec![Quoted("")],);
 
-    assert_eq!(
-        tokens("hello\n=world").take(3).collect::<Vec<_>>(),
-        vec![Word("hello\n"), Delim, Word("world")]
-    );
-}
+        assert_eq!(
+            tokens("key=val").take(4).collect::<Vec<_>>(),
+            vec![Word("key"), Delim, Word("val")]
+        );
 
-#[test]
-fn test_tokens_multiline() {
-    use Token::*;
+        assert_eq!(
+            tokens("hello\n=world").take(3).collect::<Vec<_>>(),
+            vec![Word("hello\n"), Delim, Word("world")]
+        );
+    }
 
-    assert_eq!(
-        tokens("hello\x0c\nworld\x0c\r\r\n")
-            .take(3)
-            .collect::<Vec<_>>(),
-        vec![Word("hello\x0c\nworld\x0c\r\r\n")],
-        r#"
+    #[test]
+    fn test_tokens_multiline() {
+        assert_eq!(
+            tokens("hello\x0c\nworld\x0c\r\r\n")
+                .take(3)
+                .collect::<Vec<_>>(),
+            vec![Word("hello\x0c\nworld\x0c\r\r\n")],
+            r#"
         As no ssh option can span multiple lines, `tokens` expects to operate on lines individually,
          so we currently look for "end of line" characters to be treated as any normal "word"
          character, unless they appear at the end of the input. See the docs for `tokens` for more
          examples on usage.
 
          Note: this test is intended to be more descriptive than normative."#
-    )
-}
-
-/// Accepts a line and calls the provided closure with exactly one tokenized option.
-///
-/// It normalizes the tokens into a canonical representation by handling quoted segments
-/// and lower-casing the key:
-///
-/// ```
-/// use ssh2_config::option::parse_tokens;
-///
-/// parse_tokens(r#"OPTION "Hello There""#, |opt, val| {
-///     assert_eq!(opt, "option");
-///     assert_eq!(val, "Hello There");
-/// });
-/// ```
-///
-/// Note that, since all of the known ssh option keywords are exclusively in the ASCII character space,
-/// we avoid handling of arbitrary unicode code points in the key portion of the line.
-///
-/// Note also that there are some unexpected arrangements of tokens that ssh will accept. For more
-/// information on these, see [TODO].
-///
-/// [TODO]: link to the parse / FromStr impl?
-pub fn parse_tokens<T, F>(line: &str, f: F) -> Result<T, &'static str>
-where
-    F: FnOnce(&str, &str) -> T,
-{
-    use Token::*;
-
-    let mut toks = [Delim; 6 /* one longer than the longest valid pattern */];
-    // with thanks to the collect_slice crate
-    let n = toks
-        .iter_mut()
-        .zip(tokens(line))
-        .fold(0, |count, (dest, item)| {
-            *dest = item;
-            count + 1
-        });
-
-    match toks[..n] {
-        [Word(key), Delim, Word(val)]
-        | [Word(key), Delim, Quoted(val)]
-        | [Quoted(key), Delim, Word(val)]
-        | [Quoted(key), Delim, Quoted(val)] => {
-            let k = key.to_ascii_lowercase();
-            Ok(f(&k, val))
-        }
-        [Word(k1), Quoted(k2), Delim, Word(val)] | [Word(k1), Quoted(k2), Delim, Quoted(val)] => {
-            let k = format!("{}{}", k1, k2).to_ascii_lowercase();
-            Ok(f(&k, val))
-        }
-        [Word(key), Delim, Word(v1), Quoted(v2)] | [Quoted(key), Delim, Word(v1), Quoted(v2)] => {
-            let k = key.to_ascii_lowercase();
-            let v = format!("{}{}", v1, v2);
-            Ok(f(&k, &v))
-        }
-        [Word(k1), Quoted(k2), Delim, Word(v1), Quoted(v2)] => {
-            let k = format!("{}{}", k1, k2).to_ascii_lowercase();
-            let v = format!("{}{}", v1, v2);
-            Ok(f(&k, &v))
-        }
-        [..] => Err("bad input"),
+        )
     }
-}
 
-#[test]
-fn test_parse_tokens() {
-    parse_tokens("heLlO world", |k, v| assert_eq!((k, v), ("hello", "world")))
-        .expect("parse error");
-    parse_tokens("=hello world", |k, v| {
-        assert_eq!((k, v), ("hello", "world"))
-    })
-    .expect("parse error");
-    parse_tokens("hello       world", |k, v| {
-        assert_eq!((k, v), ("hello", "world"))
-    })
-    .expect("parse error");
-    parse_tokens("hello       \"world\"", |k, v| {
-        assert_eq!((k, v), ("hello", "world"))
-    })
-    .expect("parse error");
-    parse_tokens("\"hello\"       \"world\"", |k, v| {
-        assert_eq!((k, v), ("hello", "world"))
-    })
-    .expect("parse error");
-
-    parse_tokens("h\"ello\" world", |k, v| {
-        assert_eq!((k, v), ("hello", "world"))
-    })
-    .expect("parse error");
-    parse_tokens("h\"ello\" \"world\"", |k, v| {
-        assert_eq!((k, v), ("hello", "world"))
-    })
-    .expect("parse error");
-    parse_tokens("hello w\"orld\"", |k, v| {
-        assert_eq!((k, v), ("hello", "world"))
-    })
-    .expect("parse error");
-    parse_tokens("\"hello\" w\"orld\"", |k, v| {
-        assert_eq!((k, v), ("hello", "world"))
-    })
-    .expect("parse error");
-
-    parse_tokens("h\"ello\"       wo\"rld\"", |k, v| {
-        assert_eq!((k, v), ("hello", "world"))
-    })
-    .expect("parse error");
-
-    parse_tokens("h\"el lo  \"       wo\" rld\"", |k, v| {
-        assert_eq!((k, v), ("hel lo  ", "wo rld"))
-    })
-    .expect("parse error");
-
-    // just to be sure this isn't all for naught
-    assert_eq!(
-        parse_tokens("h\"ello  \"       wo\" rld\"", |k, v| {
-            (k.to_string(), v.to_string())
+    #[test]
+    fn test_parse_tokens() {
+        parse_tokens("heLlO world", |k, v| assert_eq!((k, v), ("hello", "world")))
+            .expect("parse error");
+        parse_tokens("=hello world", |k, v| {
+            assert_eq!((k, v), ("hello", "world"))
         })
-        .expect("parse error"),
-        (String::from("hello  "), String::from("wo rld"))
-    );
+        .expect("parse error");
+        parse_tokens("hello       world", |k, v| {
+            assert_eq!((k, v), ("hello", "world"))
+        })
+        .expect("parse error");
+        parse_tokens("hello       \"world\"", |k, v| {
+            assert_eq!((k, v), ("hello", "world"))
+        })
+        .expect("parse error");
+        parse_tokens("\"hello\"       \"world\"", |k, v| {
+            assert_eq!((k, v), ("hello", "world"))
+        })
+        .expect("parse error");
 
-    parse_tokens("h\"ello", |_, _| ()).expect_err("wanted parse error");
-    parse_tokens("h\"ello       world zzz", |_, _| ()).expect_err("wanted parse error");
-    parse_tokens("h\"ello\"       wo\"rld\"zzz", |_, _| ()).expect_err("wanted parse error");
-    parse_tokens("h\"ello\"       wo\"rld\" zzz", |_, _| ()).expect_err("wanted parse error");
-    parse_tokens("h\"ello\"\"\" world", |_, _| ()).expect_err("wanted parse error");
+        parse_tokens("h\"ello\" world", |k, v| {
+            assert_eq!((k, v), ("hello", "world"))
+        })
+        .expect("parse error");
+        parse_tokens("h\"ello\" \"world\"", |k, v| {
+            assert_eq!((k, v), ("hello", "world"))
+        })
+        .expect("parse error");
+        parse_tokens("hello w\"orld\"", |k, v| {
+            assert_eq!((k, v), ("hello", "world"))
+        })
+        .expect("parse error");
+        parse_tokens("\"hello\" w\"orld\"", |k, v| {
+            assert_eq!((k, v), ("hello", "world"))
+        })
+        .expect("parse error");
+
+        parse_tokens("h\"ello\"       wo\"rld\"", |k, v| {
+            assert_eq!((k, v), ("hello", "world"))
+        })
+        .expect("parse error");
+
+        parse_tokens("h\"el lo  \"       wo\" rld\"", |k, v| {
+            assert_eq!((k, v), ("hel lo  ", "wo rld"))
+        })
+        .expect("parse error");
+
+        assert_eq!(
+            parse_tokens("h\"ello  \"       wo\" rld\"", |k, v| {
+                (k.to_string(), v.to_string())
+            })
+            .expect("parse error"),
+            (String::from("hello  "), String::from("wo rld"))
+        );
+
+        parse_tokens("h\"ello", |_, _| ()).expect_err("wanted parse error");
+        parse_tokens("h\"ello       world zzz", |_, _| ()).expect_err("wanted parse error");
+        parse_tokens("h\"ello\"       wo\"rld\"zzz", |_, _| ()).expect_err("wanted parse error");
+        parse_tokens("h\"ello\"       wo\"rld\" zzz", |_, _| ()).expect_err("wanted parse error");
+        parse_tokens("h\"ello\"\"\" world", |_, _| ()).expect_err("wanted parse error");
+    }
 }
