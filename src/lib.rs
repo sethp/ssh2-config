@@ -155,13 +155,13 @@ fn it_works() {
     );
 
     assert_eq!(
-        parse_line("user seth")
+        parse_line("User seth")
             .expect("parse failed")
             .expect("expected value"),
         User(String::from("seth"))
     );
     assert_eq!(
-        parse_line("user seth\r\n")
+        parse_line("User seth\r\n")
             .expect("parse failed")
             .expect("expected value"),
         User(String::from("seth"))

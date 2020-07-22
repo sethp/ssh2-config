@@ -444,7 +444,7 @@ pub enum Token<'a> {
     Quoted(&'a str),
     // repeated whitespace or =
     Delim,
-    // Unmatched quote: "foo -> Invalid("foo")
+    /// Ex. unmatched quote: `"foo` -> `Invalid("foo")`
     Invalid(&'a str),
 }
 
@@ -452,7 +452,6 @@ use core::str::CharIndices;
 use std::iter::Peekable;
 #[allow(unused)]
 use std::str::MatchIndices;
-// TODO: Tokens/TokensInternal?
 
 /// An iterator of [`Token`]s created with the method [`tokens`].
 ///
@@ -468,15 +467,36 @@ pub struct Tokens<'a> {
     last: Option<usize>,
 }
 
+/// Option tokenizer.
 impl<'a> Tokens<'a> {
-    // https://github.com/openssh/openssh-portable/blob/e073106f370cdd2679e41f6f55a37b491f0e82fe/misc.c#L323-L325
-    // todo docs: removed \r \n
-    const DELIMITERS: &'static [char] = &[
-        ' ', '\t', '=', /* for convenience, treat as blank, even when there's more than one */
+    /// Delimiters separate other tokens in a line. Repeated instances of delimiters will be collapsed
+    /// into a single [`Token::Delim`][0].
+    ///
+    /// For more details, see [strdelim_internal in misc.c][1].
+    ///
+    /// [0]: crate::Token::Delim
+    /// [1]: https://github.com/openssh/openssh-portable/blob/e073106f370cdd2679e41f6f55a37b491f0e82fe/misc.c#L329
+    pub const DELIMITERS: &'static [char] = &[
+        ' ', '\t', '=', /* for convenience we accept even when there's more than one */
     ];
 
-    // TODO: more kinds of blanks
-    // const CHARS: &'static [char] = &[' '];
+    /// Blanks are a superset of Delimiters that are considered "ignorable," but only when they appear at
+    /// the beginning of a line.
+    ///
+    /// Note that we differ from [upstream] by omitting the newline `'\n'` character from this set.
+    ///
+    /// [upstream]: https://github.com/openssh/openssh-portable/blob/e073106f370cdd2679e41f6f55a37b491f0e82fe/misc.c#L323-L325
+    pub const BLANK: &'static [char] = &[' ', '\t', '\r', '=' /* treat as blank */];
+
+    /// EOL blanks are a superset of Blanks that are "ignorable" at the end of a line.
+    ///
+    /// Notably this includes the "form feed" character, as well as repeated carriage returns. We don't include
+    /// the newline (`'\n'`) character in this set, however.
+    ///
+    /// See also: [readconfig.c].
+    ///
+    /// [readconfig.c]: https://github.com/openssh/openssh-portable/blob/14beca57ac92d62830c42444c26ba861812dc837/readconf.c#L916-L923
+    pub const EOL_BLANK: &'static [char] = &[' ', '\t', '\r', '\x0c' /* form feed */];
 }
 
 impl<'a> Iterator for Tokens<'a> {
@@ -495,20 +515,20 @@ impl<'a> Iterator for Tokens<'a> {
             return Some(Token::Delim);
         }
         let start = self.last.unwrap_or(0);
-        if *ch == QUOTE {
-            let start = start + QUOTE.len_utf8();
+        if *ch == '"' {
+            let start = start + '"'.len_utf8();
             self.chars.next();
             while let Some((_, ch)) = self.chars.peek() {
                 // TODO: test and/or docs
-                if *ch == QUOTE || *ch == '\n' || *ch == '\r' {
+                if *ch == '"' || *ch == '\n' || *ch == '\r' {
                     break;
                 }
                 self.chars.next();
             }
-            if let Some((i, QUOTE)) = self.chars.peek() {
+            if let Some((i, '"')) = self.chars.peek() {
                 let end = *i;
                 self.chars.next();
-                self.last = Some(end + QUOTE.len_utf8());
+                self.last = Some(end + '"'.len_utf8());
                 return Some(Token::Quoted(&self.line[start..end]));
             } else {
                 self.last = Some(self.line.len());
@@ -534,8 +554,14 @@ impl<'a> Iterator for Tokens<'a> {
 
 /// `tokens` converts a string into an iterator of [`Token`s], intended for use with [`str::lines`].
 ///
+/// These token streams are not complete, choosing to omit beginning- and end-of-line blank characters as
+/// these have no semantic importance to the format. For more details on the SSH option format, see [TODO]
+///
 /// [`Token`s]: crate::option::Token
 /// [`str::lines`]: https://doc.rust-lang.org/std/primitive.str.html#method.lines
+/// [TODO]: link to the parse / FromStr impl?
+///
+/// # Example
 ///
 /// ```
 /// use ssh2_config::option::{tokens, Token};
@@ -547,16 +573,18 @@ impl<'a> Iterator for Tokens<'a> {
 /// );
 ///
 /// assert_eq!(
-///     tokens(r#"  key  =  val"ue""#)
+///     tokens(r#"  key    val"ue"  "#)
 ///         .collect::<Vec<_>>(),
 ///     vec![Token::Word("key"), Token::Delim, Token::Word("val"), Token::Quoted("ue")]
 /// );
 /// ```
 ///
+/// In the second example, notice that the blank characters at the beginning and end of the line are omitted.
+///
 /// # A note on multi-line strings
 ///
 /// No ssh option can span multiple lines, so it's best to split before tokenizing each line individually
-/// in order to ensure proper handling of "end of line" blank delimiters like carriage returns and line feeds.
+/// in order to ensure proper handling of "end of line" blank delimiters like carriage returns and line feeds:
 ///
 /// ```
 /// use ssh2_config::option;
@@ -573,8 +601,8 @@ impl<'a> Iterator for Tokens<'a> {
 ///
 pub fn tokens(line: &str) -> Tokens {
     let line = line
-        .trim_start_matches(WHITESPACE)
-        .trim_end_matches(EOL_WHITESPACE);
+        .trim_start_matches(Tokens::BLANK)
+        .trim_end_matches(Tokens::EOL_BLANK);
     Tokens {
         line: line,
         // matcher: line.match_indices(Tokens::CHARS),
@@ -632,8 +660,10 @@ fn test_tokens_multiline() {
     use Token::*;
 
     assert_eq!(
-        tokens("hello\x0c\nworld\x0c\n").take(3).collect::<Vec<_>>(),
-        vec![Word("hello\x0c\nworld")],
+        tokens("hello\x0c\nworld\x0c\r\r\n")
+            .take(3)
+            .collect::<Vec<_>>(),
+        vec![Word("hello\x0c\nworld\x0c\r\r\n")],
         r#"
         As no ssh option can span multiple lines, `tokens` expects to operate on lines individually,
          so we currently look for "end of line" characters to be treated as any normal "word"
@@ -851,6 +881,27 @@ fn test_parse_tokens_no_vec() {
     parse_tokens_no_vec("h\"ello\"\"\" world", |_, _| ()).expect_err("wanted parse error");
 }
 
+/// Accepts a line and calls the provided closure with exactly one tokenized option.
+///
+/// It normalizes the tokens into a canonical representation by handling quoted segments
+/// and lower-casing the key:
+///
+/// ```
+/// use ssh2_config::option::parse_tokens_no_vec2;
+///
+/// parse_tokens_no_vec2(r#"OPTION "Hello There""#, |opt, val| {
+///     assert_eq!(opt, "option");
+///     assert_eq!(val, "Hello There");
+/// });
+/// ```
+///
+/// Note that, since all of the known ssh option keywords are exclusively in the ASCII character space,
+/// we avoid handling of arbitrary unicode code points in the key portion of the line.
+///
+/// Note also that there are some unexpected arrangements of tokens that ssh will accept. For more
+/// information on these, see [TODO].
+///
+/// [TODO]: link to the parse / FromStr impl?
 pub fn parse_tokens_no_vec2<T, F>(line: &str, f: F) -> Result<T, &'static str>
 where
     F: FnOnce(&str, &str) -> T,

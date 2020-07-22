@@ -5,7 +5,7 @@ use ssh2_config::option::{
 };
 use std::time::Duration;
 
-pub fn bench_options(c: &mut Criterion) {
+pub fn bench_parse_tokens(c: &mut Criterion) {
     const TEST_CASES: &[&str] = &[
         r#"key value"#,
         r#"KEY value"#,
@@ -13,7 +13,7 @@ pub fn bench_options(c: &mut Criterion) {
         r#"KEYPART1"KEYPART2" value"#,
         r#"KEYPART1"KEYPART2" VALUEPART1"VALUEPART2""#,
     ];
-    let mut g = c.benchmark_group("Per-option parsing");
+    let mut g = c.benchmark_group("Option tokenizing");
     g.measurement_time(Duration::from_secs(10));
 
     for case in TEST_CASES {
@@ -57,5 +57,5 @@ pub fn bench_options(c: &mut Criterion) {
     g.finish()
 }
 
-criterion_group!(ssh_options, bench_options);
+criterion_group!(ssh_options, bench_parse_tokens);
 criterion_main!(ssh_options);
