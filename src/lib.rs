@@ -18,9 +18,6 @@
 
 pub mod option;
 
-#[macro_use]
-extern crate lazy_static;
-
 // https://man.openbsd.org/OpenBSD-current/man5/ssh_config.5
 
 pub struct SSHConfig {}

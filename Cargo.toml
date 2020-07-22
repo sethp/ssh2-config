@@ -15,10 +15,6 @@ A configuration wrapper for ssh2-rs
 
 [dependencies]
 ssh2 = "0.8.1"
-regex = "1"
-# onig = { path = "../rust-onig/onig", version = "6" }
-onig = { git = 'https://github.com/sethp/rust-onig', branch = 'fix/empty-matches' }
-lazy_static = ""
 itertools = "0.9.0"
 
 [dev-dependencies]
@@ -27,8 +23,4 @@ criterion = "0.3.3"
 
 [[bench]]
 name = "option"
-harness = false
-
-[[bench]]
-name = "basic"
 harness = false
