@@ -126,7 +126,6 @@ pub fn tokens(line: &str) -> Tokens {
         line: line,
         // matcher: line.match_indices(Tokens::CHARS),
         // last_match: None,
-        last: None,
         chars: line.char_indices().peekable(),
     }
 }
@@ -153,7 +152,6 @@ pub struct Tokens<'a> {
     // matcher: MatchIndices<'a, &'static [char]>,
     // last_match: Option<(usize, &'a str)>,
     chars: Peekable<CharIndices<'a>>,
-    last: Option<usize>,
 }
 
 /// Option tokenizer.
@@ -192,52 +190,51 @@ impl<'a> Iterator for Tokens<'a> {
     type Item = Token<'a>;
 
     fn next(&mut self) -> Option<Token<'a>> {
-        let (_, ch) = self.chars.peek()?;
-        if Tokens::DELIMITERS.contains(ch) {
-            while let Some((i, ch)) = self.chars.peek() {
-                if !Tokens::DELIMITERS.contains(ch) {
-                    break;
+        match self.chars.peek()? {
+            (_, ch) if Tokens::DELIMITERS.contains(ch) => {
+                while let Some((_, ch)) = self.chars.peek() {
+                    if !Tokens::DELIMITERS.contains(ch) {
+                        break;
+                    }
+                    self.chars.next();
                 }
-                self.last = Some(i + ch.len_utf8());
-                self.chars.next();
+                Some(Token::Delim)
             }
-            return Some(Token::Delim);
-        }
-        let start = self.last.unwrap_or(0);
-        if *ch == '"' {
-            let start = start + '"'.len_utf8();
-            self.chars.next();
-            while let Some((_, ch)) = self.chars.peek() {
-                if *ch == '"' || *ch == '\n' {
-                    break;
+            (start, '"') => {
+                let start = start + '"'.len_utf8();
+                self.chars.next();
+                while let Some((_, ch)) = self.chars.peek() {
+                    if *ch == '"' || *ch == '\n' {
+                        break;
+                    }
+                    self.chars.next();
                 }
-                self.chars.next();
-            }
-            if let Some((i, _)) = self.chars.peek() {
-                let end = *i;
-                let ch = self.chars.next().unwrap().1;
-                self.last = Some(end + ch.len_utf8());
-                let tok = &self.line[start..end];
-                return Some(if ch == '"' {
-                    Token::Quoted(tok)
+                if let Some((i, _)) = self.chars.peek() {
+                    let end = *i;
+                    let ch = self.chars.next().unwrap().1;
+                    let tok = &self.line[start..end];
+                    Some(if ch == '"' {
+                        Token::Quoted(tok)
+                    } else {
+                        Token::Invalid(tok)
+                    })
                 } else {
-                    Token::Invalid(tok)
-                });
-            } else {
-                self.last = Some(self.line.len());
-                return Some(Token::Invalid(&self.line[start..]));
+                    Some(Token::Invalid(&self.line[start..]))
+                }
+            }
+            (start, _) => {
+                let start = *start;
+                let mut end = self.line.len();
+                while let Some((i, ch)) = self.chars.peek() {
+                    if Tokens::DELIMITERS.contains(ch) || *ch == '"' {
+                        end = *i;
+                        break;
+                    }
+                    self.chars.next();
+                }
+                Some(Token::Word(&self.line[start..end]))
             }
         }
-        let mut end = self.line.len();
-        while let Some((i, ch)) = self.chars.peek() {
-            if Tokens::DELIMITERS.contains(ch) || *ch == '"' {
-                end = *i;
-                break;
-            }
-            self.chars.next();
-        }
-        self.last = Some(end);
-        Some(Token::Word(&self.line[start..end]))
     }
 }
 
