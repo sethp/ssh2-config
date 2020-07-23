@@ -14,6 +14,7 @@ use std::str::MatchIndices;
 /// parse_tokens(r#"OPTION "Hello There""#, |opt, val| {
 ///     assert_eq!(opt, "option");
 ///     assert_eq!(val, "Hello There");
+///     Ok(())
 /// });
 /// ```
 ///
@@ -24,9 +25,11 @@ use std::str::MatchIndices;
 /// information on these, see [TODO].
 ///
 /// [TODO]: link to the parse / FromStr impl?
-pub fn parse_tokens<T, F>(line: &str, f: F) -> Result<T, &'static str>
+pub fn parse_tokens<T, F>(line: &str, f: F) -> Result<Option<T>, &'static str>
 where
-    F: FnOnce(&str, &str) -> T,
+    // TODO: better bound
+    F: FnOnce(&str, &str) -> Result<T, &'static str>,
+    // E: ???,
 {
     use Token::*;
 
@@ -41,26 +44,27 @@ where
         });
 
     match toks[..n] {
+        [] => Ok(None),
         [Word(key), Delim, Word(val)]
         | [Word(key), Delim, Quoted(val)]
         | [Quoted(key), Delim, Word(val)]
         | [Quoted(key), Delim, Quoted(val)] => {
             let k = key.to_ascii_lowercase();
-            Ok(f(&k, val))
+            Ok(Some(f(&k, val)?))
         }
         [Word(k1), Quoted(k2), Delim, Word(val)] | [Word(k1), Quoted(k2), Delim, Quoted(val)] => {
             let k = format!("{}{}", k1, k2).to_ascii_lowercase();
-            Ok(f(&k, val))
+            Ok(Some(f(&k, val)?))
         }
         [Word(key), Delim, Word(v1), Quoted(v2)] | [Quoted(key), Delim, Word(v1), Quoted(v2)] => {
             let k = key.to_ascii_lowercase();
             let v = format!("{}{}", v1, v2);
-            Ok(f(&k, &v))
+            Ok(Some(f(&k, &v)?))
         }
         [Word(k1), Quoted(k2), Delim, Word(v1), Quoted(v2)] => {
             let k = format!("{}{}", k1, k2).to_ascii_lowercase();
             let v = format!("{}{}", v1, v2);
-            Ok(f(&k, &v))
+            Ok(Some(f(&k, &v)?))
         }
         // TODO: this is not right
         [..] => Err("bad input"),
@@ -358,6 +362,9 @@ expected: `{:?}`{}"#,
 
     #[test]
     fn test_parse_tokens() {
+        let opt = parse_tokens("", |_, _| Ok(())).expect("parse_failed");
+        assert!(opt.is_none());
+
         for spelling in &[
             "Hello World",
             "=Hello World",
@@ -371,14 +378,19 @@ expected: `{:?}`{}"#,
             "\"HEllo\"  Wo\"rld\"",
             "HE\"llo\"  Wo\"rld\"",
         ] {
-            parse_tokens(spelling, |k, v| assert_eq!((k, v), ("hello", "World")))
-                .expect("parse failed");
+            parse_tokens(spelling, |k, v| Ok(assert_eq!((k, v), ("hello", "World"))))
+                .expect("parse failed")
+                .expect("nothing found");
         }
 
         parse_tokens("h\"el lo  \"       wo\" rld\"", |k, v| {
-            assert_eq!((k, v), ("hel lo  ", "wo rld"))
+            Ok(assert_eq!((k, v), ("hel lo  ", "wo rld")))
         })
-        .expect("parse failed");
+        .expect("parse failed")
+        .expect("nothing found");
+
+        parse_tokens::<(), _>("a b", |_, _| Err("thanks I hate it"))
+            .expect_err("wanted parse error");
 
         for invalid in &[
             "hello",
@@ -389,7 +401,7 @@ expected: `{:?}`{}"#,
             "h\"ello\"  wo\"rld\" zzz",
             "h\"ello\"\"\" world",
         ] {
-            parse_tokens("h\"ello", |_, _| ())
+            parse_tokens("h\"ello", |_, _| Ok(()))
                 .expect_err(format!("wanted parse error for input {:?}", invalid).as_ref());
         }
     }
