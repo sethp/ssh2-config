@@ -22,9 +22,10 @@ use std::str::MatchIndices;
 /// we avoid handling of arbitrary unicode code points in the key portion of the line.
 ///
 /// Note also that there are some unexpected arrangements of tokens that ssh will accept. For more
-/// information on these, see [TODO].
+/// information on these, see [TODO] and [`Token`].
 ///
 /// [TODO]: link to the parse / FromStr impl?
+/// [Token]: crate::option::Token
 pub fn parse_tokens<T, F>(line: &str, f: F) -> Result<Option<T>, &'static str>
 where
     // TODO: better bound
@@ -74,9 +75,11 @@ where
 /// `tokens` converts a string into an iterator of [`Token`s], intended for use with [`str::lines`].
 ///
 /// These token streams are not complete, choosing to omit beginning- and end-of-line blank characters as
-/// these have no semantic importance to the format. For more details on the SSH option format, see [TODO]
+/// these have no semantic importance to the format. For more details on the SSH option format, see [`Token`]
+/// and [TODO].
 ///
 /// [`Token`s]: crate::option::Token
+/// [`Token`]: crate::option::Token
 /// [`str::lines`]: https://doc.rust-lang.org/std/primitive.str.html#method.lines
 /// [TODO]: link to the parse / FromStr impl?
 ///
@@ -130,15 +133,42 @@ pub fn tokens(line: &str) -> Tokens {
     }
 }
 
-// TODO docs
+/// A token found in the ssh config language.
+///
+/// As we are unaware of any formal grammar for the ssh config language, this is an approximation
+/// of the minimum elements necessary to handle some of the stranger, but accepted, expressions.
+///
+/// Notably, the "delimiter" token is explicitly included because both `w1 "w2"` and `w1"w2"`
+/// are valid but have different meanings: the former is a complete config statement, declaring the
+/// value for option `w1` to be `w2`, whereas the latter is a valid config fragment expressing the
+/// single phrase `w1w2` that may be used either as an option name or value.
+///
+/// In order to tell these two cases apart, we include a literal `Delim` tokens in the stream:
+///
+/// ```
+/// use ssh2_config::option::{tokens, Token};
+///
+/// assert_eq!(
+///     tokens(r#"w1 "w2""#)
+///         .collect::<Vec<_>>(),
+///     vec![Token::Word("w1"), Token::Delim, Token::Quoted("w2")]
+/// );
+///
+/// assert_eq!(
+///     tokens(r#"w1"w2""#)
+///         .collect::<Vec<_>>(),
+///     vec![Token::Word("w1"), Token::Quoted("w2")]
+/// );
+/// ```
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Token<'a> {
     Word(&'a str),
     Quoted(&'a str),
-    // repeated whitespace or =
+    /// repeated whitespace or =
     Delim,
     /// Ex. unmatched quote: `"foo` -> `Invalid("foo")`
     Invalid(&'a str),
+    // TODO Comment
 }
 
 /// An iterator of [`Token`]s created with the method [`tokens`].
