@@ -208,17 +208,21 @@ impl<'a> Iterator for Tokens<'a> {
             let start = start + '"'.len_utf8();
             self.chars.next();
             while let Some((_, ch)) = self.chars.peek() {
-                // TODO: test and/or docs
-                if *ch == '"' || *ch == '\n' || *ch == '\r' {
+                if *ch == '"' || *ch == '\n' {
                     break;
                 }
                 self.chars.next();
             }
-            if let Some((i, '"')) = self.chars.peek() {
+            if let Some((i, _)) = self.chars.peek() {
                 let end = *i;
-                self.chars.next();
-                self.last = Some(end + '"'.len_utf8());
-                return Some(Token::Quoted(&self.line[start..end]));
+                let ch = self.chars.next().unwrap().1;
+                self.last = Some(end + ch.len_utf8());
+                let tok = &self.line[start..end];
+                return Some(if ch == '"' {
+                    Token::Quoted(tok)
+                } else {
+                    Token::Invalid(tok)
+                });
             } else {
                 self.last = Some(self.line.len());
                 return Some(Token::Invalid(&self.line[start..]));
@@ -357,6 +361,15 @@ expected: `{:?}`{}"#,
          examples on usage.
 
          Note: this test is intended to be more descriptive than normative."#
+        );
+
+        assert_eq!(
+            tokens("\"hello\r\nworld").take(3).collect::<Vec<_>>(),
+            vec![Invalid("hello\r"), Word("world")],
+            r#"
+        We make minor exception to the "`tokens` treats end of line characters as any other word
+         character" rule for handling unterminated quotes: we'd like to avoid giving the impression,
+         even in an error case, that strings in ssh configs can span multiple lines."#
         );
     }
 
