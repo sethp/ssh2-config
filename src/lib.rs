@@ -37,12 +37,10 @@ impl SSHConfig {
 }
 
 #[cfg_attr(test, derive(PartialEq, Eq, Debug))]
+#[non_exhaustive]
 pub enum SSHOption {
     User(String),
     Port(u16),
-
-    // Most things, right now
-    Unknown(String, String),
 }
 
 // TODO: line + file info?
@@ -50,6 +48,8 @@ pub enum SSHOption {
 pub enum Error {
     UnmatchedQuote,
     TrailingGarbage(String),
+
+    UnknownOption(String),
 
     InvalidPort(std::num::ParseIntError),
 }
@@ -62,6 +62,8 @@ impl fmt::Display for Error {
         match *self {
             Error::UnmatchedQuote => write!(f, "no matching `\"` found"),
             Error::TrailingGarbage(ref garbage) => write!(f, "garbage at end of line: {}", garbage),
+
+            Error::UnknownOption(ref opt) => write!(f, "unknown option {:?}", opt),
 
             Error::InvalidPort(ref err) => write!(f, "invalid port: {}", err),
         }
@@ -83,7 +85,7 @@ fn do_the_inner_thing<'a, 'b>(keyword: &'a str, opt: &'b str) -> Result<SSHOptio
     match keyword.to_ascii_lowercase().as_str() {
         "user" => Ok(User(opt.to_owned())),
         "port" => Ok(Port(opt.parse().map_err(Error::InvalidPort)?)), // TODO: getservbyname
-        _ => Ok(Unknown(keyword.to_owned(), opt.to_owned())),
+        _ => Err(Error::UnknownOption(keyword.to_string())),
     }
 }
 

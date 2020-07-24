@@ -1,4 +1,5 @@
 use core::str::CharIndices;
+use std::fmt;
 use std::iter::Peekable;
 #[allow(unused)]
 use std::str::MatchIndices;
@@ -26,11 +27,10 @@ use std::str::MatchIndices;
 ///
 /// [TODO]: link to the parse / FromStr impl?
 /// [Token]: crate::option::Token
-pub fn parse_tokens<T, F>(line: &str, f: F) -> Result<Option<T>, &'static str>
+pub fn parse_tokens<T, F, E>(line: &str, f: F) -> Result<Option<T>, Error>
 where
-    // TODO: better bound
-    F: FnOnce(&str, &str) -> Result<T, &'static str>,
-    // E: ???,
+    F: FnOnce(&str, &str) -> Result<T, E>,
+    Error: From<E>,
 {
     use Token::*;
 
@@ -67,8 +67,73 @@ where
             let v = format!("{}{}", v1, v2);
             Ok(Some(f(&k, &v)?))
         }
-        // TODO: this is not right
-        [..] => Err("bad input"),
+        [..] => Err(Error::TODO),
+    }
+}
+
+/// Error represents the ways parsing an ssh config option can fail.
+///
+/// Broadly there are two "kinds" of failure: a failure specific to parsing the option,
+/// or a failure to make sense of the config statement as a whole. These are, respectively, represented
+/// by the `Err` variant, and the other variants.
+#[derive(Debug)]
+pub enum Error {
+    TODO,
+
+    /// Missing argument, ex. `Port`
+    MissingArgument,
+    /// Unmatched quote, ex. `GlobalKnownHostsFile "/etc/ssh/ssh_known_hosts /etc/ssh/ssh_known_hosts2`
+    UnmatchedQuote,
+    // TODO: it's a context-sensitive grammar for UserKnownHostsFile, GlobalKnownHostsFile, and RekeyLimit.
+    /// Trailing arguments, ex. `Port 22 tcp`
+    TrailingGarbage(String),
+
+    /// A contextually specific error, ex. `Port -1`
+    Err(DetailedError),
+}
+
+/// DetailedError represents the various kinds of contextual failures possible when parsing an
+/// individual option.
+///
+/// The broadest categories are `UnsupportedOption` and `BadOption` which refer to known-invalid
+/// and unknown options respectively. Whether the other variants are possible depends on which
+/// keyword begins the line.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum DetailedError {
+    UnsupportedOption(String),
+    BadOption(String),
+
+    InvalidPort(std::num::ParseIntError),
+}
+
+impl std::error::Error for Error {}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            Error::TODO => write!(f, "TODO"),
+
+            Error::MissingArgument => write!(f, "missing argument"),
+            Error::UnmatchedQuote => write!(f, "no matching `\"` found"),
+            Error::TrailingGarbage(ref garbage) => write!(f, "garbage at end of line: {}", garbage),
+
+            Error::Err(ref err) => write!(f, "bad option: {}", err),
+        }
+    }
+}
+
+impl std::error::Error for DetailedError {}
+
+impl fmt::Display for DetailedError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use DetailedError::*;
+        match *self {
+            UnsupportedOption(ref opt) => write!(f, "Unsupported option: {:?}", opt),
+            BadOption(ref opt) => write!(f, "Bad option: {:?}", opt),
+
+            InvalidPort(ref err) => write!(f, "invalid port: {}", err),
+        }
     }
 }
 
@@ -271,8 +336,20 @@ impl<'a> Iterator for Tokens<'a> {
 #[cfg(test)]
 mod test {
     use super::Token::*;
-    use super::{parse_tokens, tokens, Token};
+    use super::{parse_tokens, tokens, Error, Token};
     use itertools::Itertools;
+
+    impl From<&str> for Error {
+        fn from(_: &str) -> Error {
+            Error::TODO
+        }
+    }
+
+    impl From<()> for Error {
+        fn from(_: ()) -> Error {
+            unimplemented!()
+        }
+    }
 
     #[test]
     fn test_tokens() {
@@ -402,7 +479,7 @@ expected: `{:?}`{}"#,
 
     #[test]
     fn test_parse_tokens() {
-        let opt = parse_tokens("", |_, _| Ok(())).expect("parse_failed");
+        let opt = parse_tokens::<_, _, ()>("", |_, _| Ok(())).expect("parse_failed");
         assert!(opt.is_none());
 
         for spelling in &[
@@ -418,18 +495,21 @@ expected: `{:?}`{}"#,
             "\"HEllo\"  Wo\"rld\"",
             "HE\"llo\"  Wo\"rld\"",
         ] {
-            parse_tokens(spelling, |k, v| Ok(assert_eq!((k, v), ("hello", "World"))))
+            parse_tokens::<_, _, ()>(spelling, |k, v| Ok(assert_eq!((k, v), ("hello", "World"))))
                 .expect("parse failed")
                 .expect("nothing found");
         }
 
-        parse_tokens("h\"el lo  \"       wo\" rld\"", |k, v| {
+        parse_tokens::<_, _, ()>("h\"el lo  \"       wo\" rld\"", |k, v| {
             Ok(assert_eq!((k, v), ("hel lo  ", "wo rld")))
         })
         .expect("parse failed")
         .expect("nothing found");
+    }
 
-        parse_tokens::<(), _>("a b", |_, _| Err("thanks I hate it"))
+    #[test]
+    fn test_parse_tokens_err() {
+        parse_tokens::<(), _, _>("a b", |_, _| Err("thanks I hate it"))
             .expect_err("wanted parse error");
 
         for invalid in &[
@@ -441,7 +521,7 @@ expected: `{:?}`{}"#,
             "h\"ello\"  wo\"rld\" zzz",
             "h\"ello\"\"\" world",
         ] {
-            parse_tokens("h\"ello", |_, _| Ok(()))
+            parse_tokens::<_, _, ()>("h\"ello", |_, _| Ok(()))
                 .expect_err(format!("wanted parse error for input {:?}", invalid).as_ref());
         }
     }
