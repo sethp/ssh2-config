@@ -1,23 +1,64 @@
+// TODO:
+// #![warn(missing_docs)]
+#![cfg_attr(test, deny(warnings))]
+
 use core::str::CharIndices;
 use std::fmt;
 use std::iter::Peekable;
 #[allow(unused)]
 use std::str::MatchIndices;
 
+#[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SSHOption {
+    User(String),
+    Port(u16),
+}
+
+impl std::str::FromStr for SSHOption {
+    type Err = Error;
+
+    // TODO multi-line?
+    // TODO: docs (?)
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // TODO: it's a context-sensitive grammar for UserKnownHostsFile, GlobalKnownHostsFile, and RekeyLimit.
+        use SSHOption::*;
+        match parse_tokens(s, |keyword, next| {
+            match keyword {
+                "user" => Tokens::with_one_arg(next, |arg| Ok(User(arg.to_owned()))),
+                "port" => Tokens::with_one_arg(next, |arg| {
+                    Ok(Port(arg.parse().map_err(DetailedError::InvalidPort)?))
+                }),
+                _ => Some(Err(Error::from(DetailedError::BadOption(
+                    keyword.to_string(),
+                )))),
+            }
+            .unwrap_or(Err(Error::MissingArgument))
+        })? {
+            Some(opt) => Ok(opt),
+            None => todo!(),
+        }
+    }
+}
+
 /// Accepts a line and calls the provided closure with exactly one tokenized option.
 ///
-/// It normalizes the tokens into a canonical representation by handling quoted segments
+/// It normalizes the tokens into a canonical representation by handling quoted segments,
 /// and lower-casing the key:
 ///
 /// ```
-/// use ssh2_config::option::parse_tokens;
+/// use ssh2_config::option::{Error, parse_tokens, Token, Tokens};
 ///
-/// parse_tokens(r#"OPTION "Hello There""#, |opt, val| {
+/// parse_tokens::<_, _, Error>(r#""OPTION" "Hello There""#, |opt, tokens| {
 ///     assert_eq!(opt, "option");
-///     assert_eq!(val, "Hello There");
+///     assert_eq!(tokens.next(), Some(Token::Quoted("Hello There")));
 ///     Ok(())
-/// });
+/// })
+/// .expect("parse failed")
+/// .expect("nothing found");
 /// ```
+///
+/// `parse_tokens` will also check that all of the tokens from the line are fully consumed, as does ssh.
 ///
 /// Note that, since all of the known ssh option keywords are exclusively in the ASCII character space,
 /// we avoid handling of arbitrary unicode code points in the key portion of the line.
@@ -29,45 +70,21 @@ use std::str::MatchIndices;
 /// [Token]: crate::option::Token
 pub fn parse_tokens<T, F, E>(line: &str, f: F) -> Result<Option<T>, Error>
 where
-    F: FnOnce(&str, &str) -> Result<T, E>,
+    F: FnOnce(&str, &mut dyn Iterator<Item = Token>) -> Result<T, E>,
     Error: From<E>,
 {
-    use Token::*;
+    let mut toks = tokens(line);
 
-    let mut toks = [Delim; 6 /* one longer than the longest valid pattern */];
-    // with thanks to the collect_slice crate
-    let n = toks
-        .iter_mut()
-        .zip(tokens(line))
-        .fold(0, |count, (dest, item)| {
-            *dest = item;
-            count + 1
-        });
+    let res =
+        Tokens::with_args(&mut toks, |k, toks| Ok(f(&k.to_ascii_lowercase(), toks)?)).transpose();
 
-    match toks[..n] {
-        [] => Ok(None),
-        [Word(key), Delim, Word(val)]
-        | [Word(key), Delim, Quoted(val)]
-        | [Quoted(key), Delim, Word(val)]
-        | [Quoted(key), Delim, Quoted(val)] => {
-            let k = key.to_ascii_lowercase();
-            Ok(Some(f(&k, val)?))
-        }
-        [Word(k1), Quoted(k2), Delim, Word(val)] | [Word(k1), Quoted(k2), Delim, Quoted(val)] => {
-            let k = format!("{}{}", k1, k2).to_ascii_lowercase();
-            Ok(Some(f(&k, val)?))
-        }
-        [Word(key), Delim, Word(v1), Quoted(v2)] | [Quoted(key), Delim, Word(v1), Quoted(v2)] => {
-            let k = key.to_ascii_lowercase();
-            let v = format!("{}{}", v1, v2);
-            Ok(Some(f(&k, &v)?))
-        }
-        [Word(k1), Quoted(k2), Delim, Word(v1), Quoted(v2)] => {
-            let k = format!("{}{}", k1, k2).to_ascii_lowercase();
-            let v = format!("{}{}", v1, v2);
-            Ok(Some(f(&k, &v)?))
-        }
-        [..] => Err(Error::TODO),
+    match toks.next() {
+        None => res,
+        Some(Token::Delim) => match toks.next() {
+            None => res,
+            Some(next) => Err(Error::TrailingGarbage(format!("{:?}", next))),
+        },
+        Some(next) => Err(Error::TrailingGarbage(format!("{:?}", next))),
     }
 }
 
@@ -78,18 +95,15 @@ where
 /// by the `Err` variant, and the other variants.
 #[derive(Debug)]
 pub enum Error {
-    TODO,
-
     /// Missing argument, ex. `Port`
     MissingArgument,
     /// Unmatched quote, ex. `GlobalKnownHostsFile "/etc/ssh/ssh_known_hosts /etc/ssh/ssh_known_hosts2`
     UnmatchedQuote,
-    // TODO: it's a context-sensitive grammar for UserKnownHostsFile, GlobalKnownHostsFile, and RekeyLimit.
     /// Trailing arguments, ex. `Port 22 tcp`
     TrailingGarbage(String),
 
     /// A contextually specific error, ex. `Port -1`
-    Err(DetailedError),
+    Detailed(DetailedError),
 }
 
 /// DetailedError represents the various kinds of contextual failures possible when parsing an
@@ -112,13 +126,11 @@ impl std::error::Error for Error {}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            Error::TODO => write!(f, "TODO"),
-
             Error::MissingArgument => write!(f, "missing argument"),
             Error::UnmatchedQuote => write!(f, "no matching `\"` found"),
             Error::TrailingGarbage(ref garbage) => write!(f, "garbage at end of line: {}", garbage),
 
-            Error::Err(ref err) => write!(f, "bad option: {}", err),
+            Error::Detailed(ref err) => write!(f, "{}", err),
         }
     }
 }
@@ -129,11 +141,17 @@ impl fmt::Display for DetailedError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use DetailedError::*;
         match *self {
-            UnsupportedOption(ref opt) => write!(f, "Unsupported option: {:?}", opt),
-            BadOption(ref opt) => write!(f, "Bad option: {:?}", opt),
+            UnsupportedOption(ref opt) => write!(f, "unsupported option: {:?}", opt),
+            BadOption(ref opt) => write!(f, "bad option: {:?}", opt),
 
             InvalidPort(ref err) => write!(f, "invalid port: {}", err),
         }
+    }
+}
+
+impl From<DetailedError> for Error {
+    fn from(e: DetailedError) -> Self {
+        Error::Detailed(e)
     }
 }
 
@@ -233,7 +251,7 @@ pub enum Token<'a> {
     Delim,
     /// Ex. unmatched quote: `"foo` -> `Invalid("foo")`
     Invalid(&'a str),
-    // TODO Comment
+    // TODO Comment?
 }
 
 /// An iterator of [`Token`]s created with the method [`tokens`].
@@ -270,7 +288,7 @@ impl<'a> Tokens<'a> {
     /// [upstream]: https://github.com/openssh/openssh-portable/blob/e073106f370cdd2679e41f6f55a37b491f0e82fe/misc.c#L323-L325
     pub const BLANK: &'static [char] = &[' ', '\t', '\r', '=' /* treat as blank */];
 
-    /// EOL blanks are a superset of Blanks that are "ignorable" at the end of a line.
+    /// EOL blanks are a distinct set of characters that are "ignorable" at the end of a line.
     ///
     /// Notably this includes the "form feed" character, as well as repeated carriage returns. We don't include
     /// the newline (`'\n'`) character in this set, however.
@@ -279,6 +297,53 @@ impl<'a> Tokens<'a> {
     ///
     /// [readconfig.c]: https://github.com/openssh/openssh-portable/blob/14beca57ac92d62830c42444c26ba861812dc837/readconf.c#L916-L923
     pub const EOL_BLANK: &'static [char] = &[' ', '\t', '\r', '\x0c' /* form feed */];
+
+    pub fn with_one_arg<T, F>(toks: &mut dyn Iterator<Item = Token<'a>>, f: F) -> Option<T>
+    where
+        F: FnOnce(&str) -> T,
+    {
+        Tokens::with_args(toks, |a, _| f(a))
+    }
+
+    // comparable to strdelim
+    pub fn with_args<T, F>(toks: &mut dyn Iterator<Item = Token<'a>>, f: F) -> Option<T>
+    where
+        F: FnOnce(&str, &mut dyn Iterator<Item = Token<'a>>) -> T,
+    {
+        use Token::*;
+
+        match toks.next() {
+            None => None,
+            Some(Word(w)) => match toks.next() {
+                None | Some(Delim) => Some(f(w, toks)),
+                Some(Quoted(q)) => {
+                    let arg = format!("{}{}", w, q);
+                    match toks.next() {
+                        None | Some(Delim) => Some(f(&arg, toks)),
+                        Some(next @ Word(_)) | Some(next @ Quoted(_)) => {
+                            Some(f(&arg, &mut itertools::put_back(toks).with_value(next)))
+                        }
+                        Some(Invalid(_)) => todo!(),
+                    }
+                }
+                // We can't see back-to-back word tokens
+                Some(Word(_)) => unreachable!(),
+                Some(Invalid(_)) => todo!(),
+            },
+            Some(Quoted(w)) => match toks.next() {
+                None | Some(Delim) => Some(f(w, toks)),
+                Some(next @ Quoted(_)) | Some(next @ Word(_)) => {
+                    Some(f(w, &mut itertools::put_back(toks).with_value(next)))
+                }
+                Some(Invalid(_)) => todo!(),
+            },
+
+            // We can't start with a Delim token, and the invariant is that we never leave a Delim at the
+            // beginning of the stream
+            Some(Delim) => unreachable!("invalid Delim at beginning of token stream"),
+            Some(Invalid(_)) => todo!(),
+        }
+    }
 }
 
 impl<'a> Iterator for Tokens<'a> {
@@ -335,21 +400,10 @@ impl<'a> Iterator for Tokens<'a> {
 
 #[cfg(test)]
 mod test {
+    use super::SSHOption;
     use super::Token::*;
-    use super::{parse_tokens, tokens, Error, Token};
+    use super::{parse_tokens, tokens, Error, Token, Tokens};
     use itertools::Itertools;
-
-    impl From<&str> for Error {
-        fn from(_: &str) -> Error {
-            Error::TODO
-        }
-    }
-
-    impl From<()> for Error {
-        fn from(_: ()) -> Error {
-            unimplemented!()
-        }
-    }
 
     #[test]
     fn test_tokens() {
@@ -478,51 +532,90 @@ expected: `{:?}`{}"#,
     }
 
     #[test]
-    fn test_parse_tokens() {
-        let opt = parse_tokens::<_, _, ()>("", |_, _| Ok(())).expect("parse_failed");
-        assert!(opt.is_none());
+    fn test_ssh_option() {
+        use std::str::FromStr;
 
-        for spelling in &[
-            "Hello World",
-            "=Hello World",
-            "HeLlO World",
-            "HEllo       World",
-            "HEllo  \"World\"",
-            "\"HEllo\"  \"World\"",
-            "H\"Ello\"  World",
-            "H\"Ello\"  \"World\"",
-            "HEllo  Wo\"rld\"",
-            "\"HEllo\"  Wo\"rld\"",
-            "HE\"llo\"  Wo\"rld\"",
-        ] {
-            parse_tokens::<_, _, ()>(spelling, |k, v| Ok(assert_eq!((k, v), ("hello", "World"))))
-                .expect("parse failed")
-                .expect("nothing found");
+        macro_rules! assert_parse {
+            ($s:expr, $opt:expr) => {
+                assert_eq!(
+                    SSHOption::from_str($s)
+                        .expect(format!("parse failed on input {:?}", $s).as_str()),
+                    $opt,
+                    "for input: {:?}",
+                    $s
+                );
+            };
         }
 
-        parse_tokens::<_, _, ()>("h\"el lo  \"       wo\" rld\"", |k, v| {
-            Ok(assert_eq!((k, v), ("hel lo  ", "wo rld")))
-        })
-        .expect("parse failed")
-        .expect("nothing found");
+        assert_parse!(r#"User dusty"#, SSHOption::User(String::from("dusty")));
+        assert_parse!(r#"Port 22"#, SSHOption::Port(22));
+        // TODO: getservbyname
+        // assert_parse!(r#"Port ssh"#, SSHOption::Port(22));
     }
 
     #[test]
+    fn test_parse_tokens() {
+        let opt = parse_tokens::<_, _, Error>("", |_, _| Ok(())).expect("parse failed");
+        assert!(opt.is_none());
+
+        for spelling in &[
+            r#"Hello World"#,
+            r#"=Hello World"#,
+            r#"HeLlO World"#,
+            r#"HEllo       World"#,
+            r#"HEllo  "World""#,
+            r#""HEllo"  "World""#,
+            r#"H"Ello"  World"#,
+            r#"H"Ello"  "World""#,
+            r#"HEllo  Wo"rld""#,
+            r#""HEllo"  Wo"rld""#,
+            r#"HE"llo"  Wo"rld""#,
+            r#""Hello"World"#,
+            r#""Hello""World""#,
+            r#"H"ello""World""#,
+            r#"H"ello"W"orld""#,
+        ] {
+            parse_tokens::<_, _, Error>(spelling, |k, toks| {
+                Tokens::with_one_arg(toks, |v| {
+                    assert_eq!(
+                        (k, v),
+                        ("hello", "World"),
+                        "failed for input: {:?}",
+                        spelling
+                    );
+                })
+                .expect(format!("failed to find two arguments in input: {:?}", spelling).as_str());
+                Ok(())
+            })
+            .expect("parse failed")
+            .expect("nothing found");
+        }
+
+        parse_tokens::<_, _, Error>("h\"el lo  \"       wo\" rld\"", |k, toks| {
+            Tokens::with_one_arg(toks, |v| assert_eq!((k, v), ("hel lo  ", "wo rld")));
+            Ok(())
+        })
+        .expect("parse failed")
+        .expect("nothing found");
+
+        // TODO: is this one ok?
+        parse_tokens::<_, _, Error>("hello=", |k, _| Ok(assert_eq!(k, "hello")))
+            .expect("wanted to skip trailing delimiter(s)")
+            .expect("nothing found");
+    }
+
+    #[test]
+    #[ignore]
     fn test_parse_tokens_err() {
-        parse_tokens::<(), _, _>("a b", |_, _| Err("thanks I hate it"))
+        parse_tokens::<(), _, _>("a b", |_, _| Err(Error::MissingArgument))
             .expect_err("wanted parse error");
 
-        for invalid in &[
-            "hello",
-            "hello world zzz",
-            "h\"ello",
-            "h\"ello    world zzz",
-            "h\"ello\"  wo\"rld\"zzz",
-            "h\"ello\"  wo\"rld\" zzz",
-            "h\"ello\"\"\" world",
-        ] {
-            parse_tokens::<_, _, ()>("h\"ello", |_, _| Ok(()))
-                .expect_err(format!("wanted parse error for input {:?}", invalid).as_ref());
-        }
+        parse_tokens::<_, _, Error>("hello world", |_, _| Ok(()))
+            .expect_err("wanted parse error for unconsumed tokens");
+
+        parse_tokens::<_, _, Error>("\"ello", |_, _| Ok(())).expect_err("wanted parse error");
+        parse_tokens::<_, _, Error>("h\"ello", |_, _| Ok(())).expect_err("wanted parse error");
+        parse_tokens::<_, _, Error>("h\"\"\"ello", |_, _| Ok(())).expect_err("wanted parse error");
+        parse_tokens::<_, _, Error>("\"h\"\"ello", |_, _| Ok(())).expect_err("wanted parse error");
     }
 }
