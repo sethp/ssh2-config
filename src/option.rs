@@ -3,6 +3,7 @@
 #![cfg_attr(test, deny(warnings))]
 
 use core::str::CharIndices;
+use itertools::{put_back, PutBack};
 use std::fmt;
 use std::iter::Peekable;
 #[allow(unused)]
@@ -70,21 +71,20 @@ impl std::str::FromStr for SSHOption {
 /// [Token]: crate::option::Token
 pub fn parse_tokens<T, F, E>(line: &str, f: F) -> Result<Option<T>, Error>
 where
-    F: FnOnce(&str, &mut dyn Iterator<Item = Token>) -> Result<T, E>,
+    F: FnOnce(&str, &mut PutBack<Tokens>) -> Result<T, E>,
     Error: From<E>,
 {
-    let mut toks = tokens(line);
+    let mut toks = put_back(tokens(line));
 
-    let res =
-        Tokens::with_args(&mut toks, |k, toks| Ok(f(&k.to_ascii_lowercase(), toks)?)).transpose();
+    let res = Tokens::with_args(&mut toks, |k, toks| Ok(f(&k.to_ascii_lowercase(), toks)?))
+        .transpose()?;
 
     match toks.next() {
-        None => res,
-        Some(Token::Delim) => match toks.next() {
-            None => res,
-            Some(next) => Err(Error::TrailingGarbage(format!("{:?}", next))),
-        },
-        Some(next) => Err(Error::TrailingGarbage(format!("{:?}", next))),
+        None => Ok(res),
+        // something something never leave a delim at beginning of stream
+        Some(Token::Delim) => unreachable!(),
+        Some(Token::Word(s)) | Some(Token::Quoted(s)) => Err(Error::TrailingGarbage(s.to_owned())),
+        Some(Token::Invalid(s)) => Err(Error::UnmatchedQuote(s.to_owned())),
     }
 }
 
@@ -98,7 +98,7 @@ pub enum Error {
     /// Missing argument, ex. `Port`
     MissingArgument,
     /// Unmatched quote, ex. `GlobalKnownHostsFile "/etc/ssh/ssh_known_hosts /etc/ssh/ssh_known_hosts2`
-    UnmatchedQuote,
+    UnmatchedQuote(String),
     /// Trailing arguments, ex. `Port 22 tcp`
     TrailingGarbage(String),
 
@@ -127,8 +127,12 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             Error::MissingArgument => write!(f, "missing argument"),
-            Error::UnmatchedQuote => write!(f, "no matching `\"` found"),
-            Error::TrailingGarbage(ref garbage) => write!(f, "garbage at end of line: {}", garbage),
+            Error::UnmatchedQuote(ref invalid) => {
+                write!(f, "no matching `\"` found: \"{}", invalid)
+            }
+            Error::TrailingGarbage(ref garbage) => {
+                write!(f, "garbage at end of line, starting at: {}", garbage)
+            }
 
             Error::Detailed(ref err) => write!(f, "{}", err),
         }
@@ -298,7 +302,7 @@ impl<'a> Tokens<'a> {
     /// [readconfig.c]: https://github.com/openssh/openssh-portable/blob/14beca57ac92d62830c42444c26ba861812dc837/readconf.c#L916-L923
     pub const EOL_BLANK: &'static [char] = &[' ', '\t', '\r', '\x0c' /* form feed */];
 
-    pub fn with_one_arg<T, F>(toks: &mut dyn Iterator<Item = Token<'a>>, f: F) -> Option<T>
+    pub fn with_one_arg<T, F>(toks: &mut PutBack<Tokens>, f: F) -> Option<T>
     where
         F: FnOnce(&str) -> T,
     {
@@ -306,9 +310,9 @@ impl<'a> Tokens<'a> {
     }
 
     // comparable to strdelim
-    pub fn with_args<T, F>(toks: &mut dyn Iterator<Item = Token<'a>>, f: F) -> Option<T>
+    pub fn with_args<T, F>(toks: &mut PutBack<Tokens>, f: F) -> Option<T>
     where
-        F: FnOnce(&str, &mut dyn Iterator<Item = Token<'a>>) -> T,
+        F: FnOnce(&str, &mut PutBack<Tokens>) -> T,
     {
         use Token::*;
 
@@ -321,27 +325,41 @@ impl<'a> Tokens<'a> {
                     match toks.next() {
                         None | Some(Delim) => Some(f(&arg, toks)),
                         Some(next @ Word(_)) | Some(next @ Quoted(_)) => {
-                            Some(f(&arg, &mut itertools::put_back(toks).with_value(next)))
+                            toks.put_back(next);
+                            Some(f(&arg, toks))
                         }
-                        Some(Invalid(_)) => todo!(),
+                        Some(next @ Invalid(_)) => {
+                            toks.put_back(next);
+                            None
+                        }
                     }
                 }
                 // We can't see back-to-back word tokens
                 Some(Word(_)) => unreachable!(),
-                Some(Invalid(_)) => todo!(),
+                Some(next @ Invalid(_)) => {
+                    toks.put_back(next);
+                    None
+                }
             },
             Some(Quoted(w)) => match toks.next() {
                 None | Some(Delim) => Some(f(w, toks)),
                 Some(next @ Quoted(_)) | Some(next @ Word(_)) => {
-                    Some(f(w, &mut itertools::put_back(toks).with_value(next)))
+                    toks.put_back(next);
+                    Some(f(w, toks))
                 }
-                Some(Invalid(_)) => todo!(),
+                Some(next @ Invalid(_)) => {
+                    toks.put_back(next);
+                    None
+                }
             },
 
             // We can't start with a Delim token, and the invariant is that we never leave a Delim at the
             // beginning of the stream
             Some(Delim) => unreachable!("invalid Delim at beginning of token stream"),
-            Some(Invalid(_)) => todo!(),
+            Some(next @ Invalid(_)) => {
+                toks.put_back(next);
+                None
+            }
         }
     }
 }
@@ -604,18 +622,82 @@ expected: `{:?}`{}"#,
             .expect("nothing found");
     }
 
+    macro_rules! assert_matches {
+        ( $e:expr, $pat:pat ) => {
+            match ($e) {
+                $pat => (),
+                expr => panic!(
+                    r#"assertion failed: expression did not match pattern
+    expr: `{:?}`
+ pattern: `{}`"#,
+                    expr,
+                    stringify!($pat)
+                ),
+            }
+        };
+        ( $e:expr, $pat:pat, ) => {
+            assert_matches!($e, $pat)
+        };
+        ( $e:expr, $pat:pat => $arm:expr ) => {
+            match ($e) {
+                $pat => ($arm),
+                expr => panic!(
+                    r#"assertion failed: expression did not match pattern
+    expr: `{:?}`
+ pattern: `{}`"#,
+                    expr,
+                    stringify!($pat if $guard)
+                ),
+            }
+        };
+        ( $e:expr, $pat:pat => $arm:expr ) => {
+            match ($e) {
+                $pat => ($arm),
+                expr => panic!(
+                    r#"assertion failed: expression did not match pattern
+    expr: `{:?}`
+ pattern: `{}`"#,
+                    expr,
+                    stringify!($pat if $guard)
+                ),
+            }
+        };
+        ( $e:expr, $pat:pat => $arm:expr, ) => {
+            assert_matches!(e, pat)
+        };
+    }
+
     #[test]
-    #[ignore]
     fn test_parse_tokens_err() {
-        parse_tokens::<(), _, _>("a b", |_, _| Err(Error::MissingArgument))
-            .expect_err("wanted parse error");
+        assert_matches!(
+            parse_tokens::<(), _, _>("a b", |_, _| Err(Error::MissingArgument))
+                .expect_err("wanted parse error"),
+            Error::MissingArgument
+        );
 
-        parse_tokens::<_, _, Error>("hello world", |_, _| Ok(()))
-            .expect_err("wanted parse error for unconsumed tokens");
+        assert_matches!(
+            parse_tokens::<_, _, Error>("hello world", |_, _| Ok(()))
+                .expect_err("wanted parse error for unconsumed tokens"),
+            Error::TrailingGarbage(w) => assert_eq!(w, "world")
+        );
 
-        parse_tokens::<_, _, Error>("\"ello", |_, _| Ok(())).expect_err("wanted parse error");
-        parse_tokens::<_, _, Error>("h\"ello", |_, _| Ok(())).expect_err("wanted parse error");
-        parse_tokens::<_, _, Error>("h\"\"\"ello", |_, _| Ok(())).expect_err("wanted parse error");
-        parse_tokens::<_, _, Error>("\"h\"\"ello", |_, _| Ok(())).expect_err("wanted parse error");
+        assert_matches!(
+            parse_tokens::<_, _, Error>("\"ello", |_, _| Ok(())).expect_err("wanted parse error"),
+            Error::UnmatchedQuote(s) => assert_eq!(s, "ello")
+        );
+        assert_matches!(
+            parse_tokens::<_, _, Error>("h\"ello", |_, _| Ok(())).expect_err("wanted parse error"),
+            Error::UnmatchedQuote(s) => assert_eq!(s, "ello")
+        );
+        assert_matches!(
+            parse_tokens::<_, _, Error>("h\"\"\"ello", |_, _| Ok(()))
+                .expect_err("wanted parse error"),
+            Error::UnmatchedQuote(s) => assert_eq!(s, "ello")
+        );
+        assert_matches!(
+            parse_tokens::<_, _, Error>("\"h\"\"ello", |_, _| Ok(()))
+                .expect_err("wanted parse error"),
+            Error::UnmatchedQuote(s) => assert_eq!(s, "ello")
+        );
     }
 }
