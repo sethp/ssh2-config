@@ -3,7 +3,6 @@
 #![cfg_attr(test, deny(warnings))]
 
 use core::str::CharIndices;
-use itertools::{put_back, PutBack};
 use std::fmt;
 use std::iter::Peekable;
 #[allow(unused)]
@@ -24,19 +23,16 @@ impl std::str::FromStr for SSHOption {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         // TODO: it's a context-sensitive grammar for UserKnownHostsFile, GlobalKnownHostsFile, and RekeyLimit.
         use SSHOption::*;
-        match parse_tokens(s, |keyword, next| {
-            match keyword {
-                "user" => Tokens::with_one_arg(next, |arg| Ok(User(arg.to_owned()))),
-                "port" => Tokens::with_one_arg(next, |arg| {
-                    Ok(Port(arg.parse().map_err(DetailedError::InvalidPort)?))
-                }),
-                _ => Some(Err(Error::from(DetailedError::BadOption(
-                    keyword.to_string(),
-                )))),
-            }
-            .unwrap_or(Err(Error::MissingArgument))
-        })? {
-            Some(opt) => Ok(opt),
+        match parse_tokens(s, |keyword, next| match keyword {
+            "user" => Tokens::with_one_arg(next, |arg| Ok(User(arg.to_owned()))),
+            "port" => Tokens::with_one_arg(next, |arg| {
+                Ok(Port(arg.parse().map_err(DetailedError::InvalidPort)?))
+            }),
+            _ => Err(Error::from(DetailedError::BadOption(keyword.to_string()))),
+        })
+        .transpose()
+        {
+            Some(res) => res,
             None => todo!(),
         }
     }
@@ -71,16 +67,20 @@ impl std::str::FromStr for SSHOption {
 /// [Token]: crate::option::Token
 pub fn parse_tokens<T, F, E>(line: &str, f: F) -> Result<Option<T>, Error>
 where
-    F: FnOnce(&str, &mut PutBack<Tokens>) -> Result<T, E>,
+    F: FnOnce(&str, &mut dyn Iterator<Item = Token>) -> Result<T, E>,
     Error: From<E>,
 {
-    let mut toks = put_back(tokens(line));
+    let mut toks = itertools::put_back(tokens(line));
+    let first = toks.next();
+    if let None = first {
+        return Ok(None);
+    }
+    toks.put_back(first.unwrap());
 
-    let res = Tokens::with_args(&mut toks, |k, toks| Ok(f(&k.to_ascii_lowercase(), toks)?))
-        .transpose()?;
+    let res = Tokens::with_args(&mut toks, |k, toks| Ok(f(&k.to_ascii_lowercase(), toks)?))?;
 
     match toks.next() {
-        None => Ok(res),
+        None => Ok(Some(res)),
         // something something never leave a delim at beginning of stream
         Some(Token::Delim) => unreachable!(),
         Some(Token::Word(s)) | Some(Token::Quoted(s)) => Err(Error::TrailingGarbage(s.to_owned())),
@@ -302,64 +302,50 @@ impl<'a> Tokens<'a> {
     /// [readconfig.c]: https://github.com/openssh/openssh-portable/blob/14beca57ac92d62830c42444c26ba861812dc837/readconf.c#L916-L923
     pub const EOL_BLANK: &'static [char] = &[' ', '\t', '\r', '\x0c' /* form feed */];
 
-    pub fn with_one_arg<T, F>(toks: &mut PutBack<Tokens>, f: F) -> Option<T>
+    pub fn with_one_arg<T, F>(toks: &mut dyn Iterator<Item = Token<'a>>, f: F) -> Result<T, Error>
     where
-        F: FnOnce(&str) -> T,
+        F: FnOnce(&str) -> Result<T, Error>,
     {
         Tokens::with_args(toks, |a, _| f(a))
     }
 
     // comparable to strdelim
-    pub fn with_args<T, F>(toks: &mut PutBack<Tokens>, f: F) -> Option<T>
+    pub fn with_args<T, F>(toks: &mut dyn Iterator<Item = Token<'a>>, f: F) -> Result<T, Error>
     where
-        F: FnOnce(&str, &mut PutBack<Tokens>) -> T,
+        F: FnOnce(&str, &mut dyn Iterator<Item = Token<'a>>) -> Result<T, Error>,
     {
         use Token::*;
 
         match toks.next() {
-            None => None,
+            None => Err(Error::MissingArgument),
             Some(Word(w)) => match toks.next() {
-                None | Some(Delim) => Some(f(w, toks)),
+                None | Some(Delim) => f(w, toks),
                 Some(Quoted(q)) => {
                     let arg = format!("{}{}", w, q);
                     match toks.next() {
-                        None | Some(Delim) => Some(f(&arg, toks)),
+                        None | Some(Delim) => f(&arg, toks),
                         Some(next @ Word(_)) | Some(next @ Quoted(_)) => {
-                            toks.put_back(next);
-                            Some(f(&arg, toks))
+                            f(&arg, &mut itertools::put_back(toks).with_value(next))
                         }
-                        Some(next @ Invalid(_)) => {
-                            toks.put_back(next);
-                            None
-                        }
+                        Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
                     }
                 }
                 // We can't see back-to-back word tokens
                 Some(Word(_)) => unreachable!(),
-                Some(next @ Invalid(_)) => {
-                    toks.put_back(next);
-                    None
-                }
+                Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
             },
             Some(Quoted(w)) => match toks.next() {
-                None | Some(Delim) => Some(f(w, toks)),
+                None | Some(Delim) => f(w, toks),
                 Some(next @ Quoted(_)) | Some(next @ Word(_)) => {
-                    toks.put_back(next);
-                    Some(f(w, toks))
+                    f(w, &mut itertools::put_back(toks).with_value(next))
                 }
-                Some(next @ Invalid(_)) => {
-                    toks.put_back(next);
-                    None
-                }
+                Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
             },
 
             // We can't start with a Delim token, and the invariant is that we never leave a Delim at the
             // beginning of the stream
             Some(Delim) => unreachable!("invalid Delim at beginning of token stream"),
-            Some(next @ Invalid(_)) => {
-                toks.put_back(next);
-                None
-            }
+            Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
         }
     }
 }
@@ -573,8 +559,11 @@ expected: `{:?}`{}"#,
 
     #[test]
     fn test_parse_tokens() {
-        let opt = parse_tokens::<_, _, Error>("", |_, _| Ok(())).expect("parse failed");
-        assert!(opt.is_none());
+        assert_matches!(
+            parse_tokens::<_, _, Error>("", |_, _| Ok(())),
+            Ok(None),
+            "expected to successfully parse nothing"
+        );
 
         for spelling in &[
             r#"Hello World"#,
@@ -595,23 +584,20 @@ expected: `{:?}`{}"#,
         ] {
             parse_tokens::<_, _, Error>(spelling, |k, toks| {
                 Tokens::with_one_arg(toks, |v| {
-                    assert_eq!(
+                    Ok(assert_eq!(
                         (k, v),
                         ("hello", "World"),
                         "failed for input: {:?}",
                         spelling
-                    );
+                    ))
                 })
-                .expect(format!("failed to find two arguments in input: {:?}", spelling).as_str());
-                Ok(())
             })
-            .expect("parse failed")
+            .expect(format!("parse failed for input: {:?}", spelling).as_str())
             .expect("nothing found");
         }
 
         parse_tokens::<_, _, Error>("h\"el lo  \"       wo\" rld\"", |k, toks| {
-            Tokens::with_one_arg(toks, |v| assert_eq!((k, v), ("hel lo  ", "wo rld")));
-            Ok(())
+            Tokens::with_one_arg(toks, |v| Ok(assert_eq!((k, v), ("hel lo  ", "wo rld"))))
         })
         .expect("parse failed")
         .expect("nothing found");
