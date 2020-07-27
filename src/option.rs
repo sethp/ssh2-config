@@ -622,51 +622,6 @@ expected: `{:?}`{}"#,
             .expect("nothing found");
     }
 
-    macro_rules! assert_matches {
-        ( $e:expr, $pat:pat ) => {
-            match ($e) {
-                $pat => (),
-                expr => panic!(
-                    r#"assertion failed: expression did not match pattern
-    expr: `{:?}`
- pattern: `{}`"#,
-                    expr,
-                    stringify!($pat)
-                ),
-            }
-        };
-        ( $e:expr, $pat:pat, ) => {
-            assert_matches!($e, $pat)
-        };
-        ( $e:expr, $pat:pat => $arm:expr ) => {
-            match ($e) {
-                $pat => ($arm),
-                expr => panic!(
-                    r#"assertion failed: expression did not match pattern
-    expr: `{:?}`
- pattern: `{}`"#,
-                    expr,
-                    stringify!($pat if $guard)
-                ),
-            }
-        };
-        ( $e:expr, $pat:pat => $arm:expr ) => {
-            match ($e) {
-                $pat => ($arm),
-                expr => panic!(
-                    r#"assertion failed: expression did not match pattern
-    expr: `{:?}`
- pattern: `{}`"#,
-                    expr,
-                    stringify!($pat if $guard)
-                ),
-            }
-        };
-        ( $e:expr, $pat:pat => $arm:expr, ) => {
-            assert_matches!(e, pat)
-        };
-    }
-
     #[test]
     fn test_parse_tokens_err() {
         assert_matches!(

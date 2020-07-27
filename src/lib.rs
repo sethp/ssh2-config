@@ -16,6 +16,10 @@
 // #![deny(missing_docs, unused_results)]
 #![cfg_attr(test, deny(warnings))]
 
+#[cfg(test)]
+#[macro_use]
+extern crate assert_matches;
+
 pub mod option;
 
 // https://man.openbsd.org/OpenBSD-current/man5/ssh_config.5
