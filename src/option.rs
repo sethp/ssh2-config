@@ -15,25 +15,25 @@ pub enum SSHOption {
     Port(u16),
 }
 
+pub fn parse_opt(line: &str) -> Result<Option<SSHOption>, Error> {
+    // TODO: it's a context-sensitive grammar for UserKnownHostsFile, GlobalKnownHostsFile, and RekeyLimit.
+    use SSHOption::*;
+    parse_tokens(line, |keyword, args| match keyword {
+        "user" => args.with_one(|arg| Ok(User(arg.to_owned()))),
+        "port" => args.with_one(|arg| Ok(Port(arg.parse().map_err(DetailedError::InvalidPort)?))),
+        _ => Err(Error::from(DetailedError::BadOption(keyword.to_string()))),
+    })
+}
+
 impl std::str::FromStr for SSHOption {
     type Err = Error;
 
     // TODO multi-line?
     // TODO: docs (?)
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // TODO: it's a context-sensitive grammar for UserKnownHostsFile, GlobalKnownHostsFile, and RekeyLimit.
-        use SSHOption::*;
-        match parse_tokens(s, |keyword, next| match keyword {
-            "user" => Tokens::with_one_arg(next, |arg| Ok(User(arg.to_owned()))),
-            "port" => Tokens::with_one_arg(next, |arg| {
-                Ok(Port(arg.parse().map_err(DetailedError::InvalidPort)?))
-            }),
-            _ => Err(Error::from(DetailedError::BadOption(keyword.to_string()))),
-        })
-        .transpose()
-        {
+        match parse_opt(s).transpose() {
             Some(res) => res,
-            None => todo!(),
+            None => Err(Error::MissingArgument),
         }
     }
 }
@@ -46,10 +46,11 @@ impl std::str::FromStr for SSHOption {
 /// ```
 /// use ssh2_config::option::{Error, parse_tokens, Token, Tokens};
 ///
-/// parse_tokens::<_, _, Error>(r#""OPTION" "Hello There""#, |opt, tokens| {
+/// parse_tokens::<_, _, Error>(r#""OPTION" "Hello There""#, |opt, args| {
 ///     assert_eq!(opt, "option");
-///     assert_eq!(tokens.next(), Some(Token::Quoted("Hello There")));
-///     Ok(())
+///     args.with_one(|val| {
+///         Ok(assert_eq!(val, "Hello There"))
+///     })
 /// })
 /// .expect("parse failed")
 /// .expect("nothing found");
@@ -67,19 +68,17 @@ impl std::str::FromStr for SSHOption {
 /// [Token]: crate::option::Token
 pub fn parse_tokens<T, F, E>(line: &str, f: F) -> Result<Option<T>, Error>
 where
-    F: FnOnce(&str, &mut dyn Iterator<Item = Token>) -> Result<T, E>,
+    F: FnOnce(&str, &mut Arguments) -> Result<T, E>,
     Error: From<E>,
 {
-    let mut toks = itertools::put_back(tokens(line));
-    let first = toks.next();
-    if let None = first {
+    let mut args = Arguments(itertools::put_back(tokens(line)));
+    if !args.has_next() {
         return Ok(None);
     }
-    toks.put_back(first.unwrap());
 
-    let res = Tokens::with_args(&mut toks, |k, toks| Ok(f(&k.to_ascii_lowercase(), toks)?))?;
+    let res = args.with_next(|k, args| Ok(f(&k.to_ascii_lowercase(), args)?))?;
 
-    match toks.next() {
+    match args.0.next() {
         None => Ok(Some(res)),
         // something something never leave a delim at beginning of stream
         Some(Token::Delim) => unreachable!(),
@@ -350,6 +349,67 @@ impl<'a> Tokens<'a> {
     }
 }
 
+pub struct Arguments<'a>(itertools::PutBack<Tokens<'a>>);
+
+impl<'a> Arguments<'a> {
+    pub fn has_next(self: &mut Self) -> bool {
+        if let Some(next) = self.0.next() {
+            self.0.put_back(next);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn with_one<T, F>(self: &mut Self, f: F) -> Result<T, Error>
+    where
+        F: FnOnce(&str) -> Result<T, Error>,
+    {
+        self.with_next(|a, _| f(a))
+    }
+
+    pub fn with_next<T, F>(self: &mut Self, f: F) -> Result<T, Error>
+    where
+        F: FnOnce(&str, &mut Self) -> Result<T, Error>,
+    {
+        use Token::*;
+
+        match self.0.next() {
+            None => Err(Error::MissingArgument),
+            Some(Word(w)) => match self.0.next() {
+                None | Some(Delim) => f(w, self),
+                Some(Quoted(q)) => {
+                    let arg = format!("{}{}", w, q);
+                    match self.0.next() {
+                        None | Some(Delim) => f(&arg, self),
+                        Some(next @ Word(_)) | Some(next @ Quoted(_)) => {
+                            self.0.put_back(next);
+                            f(&arg, self)
+                        }
+                        Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
+                    }
+                }
+                // We can't see back-to-back word tokens
+                Some(Word(_)) => unreachable!(),
+                Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
+            },
+            Some(Quoted(w)) => match self.0.next() {
+                None | Some(Delim) => f(w, self),
+                Some(next @ Quoted(_)) | Some(next @ Word(_)) => {
+                    self.0.put_back(next);
+                    f(w, self)
+                }
+                Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
+            },
+
+            // We can't start with a Delim token, and the invariant is that we never leave a Delim at the
+            // beginning of the stream
+            Some(Delim) => unreachable!("invalid Delim at beginning of token stream"),
+            Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
+        }
+    }
+}
+
 impl<'a> Iterator for Tokens<'a> {
     type Item = Token<'a>;
 
@@ -406,7 +466,7 @@ impl<'a> Iterator for Tokens<'a> {
 mod test {
     use super::SSHOption;
     use super::Token::*;
-    use super::{parse_tokens, tokens, Error, Token, Tokens};
+    use super::{parse_tokens, tokens, Error, Token};
     use itertools::Itertools;
 
     #[test]
@@ -536,28 +596,6 @@ expected: `{:?}`{}"#,
     }
 
     #[test]
-    fn test_ssh_option() {
-        use std::str::FromStr;
-
-        macro_rules! assert_parse {
-            ($s:expr, $opt:expr) => {
-                assert_eq!(
-                    SSHOption::from_str($s)
-                        .expect(format!("parse failed on input {:?}", $s).as_str()),
-                    $opt,
-                    "for input: {:?}",
-                    $s
-                );
-            };
-        }
-
-        assert_parse!(r#"User dusty"#, SSHOption::User(String::from("dusty")));
-        assert_parse!(r#"Port 22"#, SSHOption::Port(22));
-        // TODO: getservbyname
-        // assert_parse!(r#"Port ssh"#, SSHOption::Port(22));
-    }
-
-    #[test]
     fn test_parse_tokens() {
         assert_matches!(
             parse_tokens::<_, _, Error>("", |_, _| Ok(())),
@@ -582,8 +620,8 @@ expected: `{:?}`{}"#,
             r#"H"ello""World""#,
             r#"H"ello"W"orld""#,
         ] {
-            parse_tokens::<_, _, Error>(spelling, |k, toks| {
-                Tokens::with_one_arg(toks, |v| {
+            parse_tokens::<_, _, Error>(spelling, |k, args| {
+                args.with_one(|v| {
                     Ok(assert_eq!(
                         (k, v),
                         ("hello", "World"),
@@ -596,8 +634,8 @@ expected: `{:?}`{}"#,
             .expect("nothing found");
         }
 
-        parse_tokens::<_, _, Error>("h\"el lo  \"       wo\" rld\"", |k, toks| {
-            Tokens::with_one_arg(toks, |v| Ok(assert_eq!((k, v), ("hel lo  ", "wo rld"))))
+        parse_tokens::<_, _, Error>("h\"el lo  \"       wo\" rld\"", |k, args| {
+            args.with_one(|v| Ok(assert_eq!((k, v), ("hel lo  ", "wo rld"))))
         })
         .expect("parse failed")
         .expect("nothing found");
@@ -640,5 +678,27 @@ expected: `{:?}`{}"#,
                 .expect_err("wanted parse error"),
             Error::UnmatchedQuote(s) => assert_eq!(s, "ello")
         );
+    }
+
+    #[test]
+    fn test_ssh_option() {
+        use std::str::FromStr;
+
+        macro_rules! assert_parse {
+            ($s:expr, $opt:expr) => {
+                assert_eq!(
+                    SSHOption::from_str($s)
+                        .expect(format!("parse failed on input {:?}", $s).as_str()),
+                    $opt,
+                    "for input: {:?}",
+                    $s
+                );
+            };
+        }
+
+        assert_parse!(r#"User dusty"#, SSHOption::User(String::from("dusty")));
+        assert_parse!(r#"Port 22"#, SSHOption::Port(22));
+        // TODO: getservbyname
+        // assert_parse!(r#"Port ssh"#, SSHOption::Port(22));
     }
 }

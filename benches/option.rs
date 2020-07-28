@@ -1,14 +1,16 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use ssh2_config::option::parse_tokens;
+use ssh2_config::option::{parse_tokens, Error};
 use std::time::Duration;
 
 pub fn bench_parse_tokens(c: &mut Criterion) {
     const TEST_CASES: &[&str] = &[
         r#"key value"#,
         r#"KEY value"#,
-        r#""KEY" "value""#,
+        r#""KEY"value"#,
+        r#""KEY""value""#,
         r#"KEYPART1"KEYPART2" value"#,
-        r#"KEYPART1"KEYPART2" VALUEPART1"VALUEPART2""#,
+        r#"KEYPART1"KEYPART2"value"#,
+        r#"KEYPART1"KEYPART2""value""#,
     ];
     let mut g = c.benchmark_group("Option tokenizing");
     g.measurement_time(Duration::from_secs(10));
@@ -17,7 +19,11 @@ pub fn bench_parse_tokens(c: &mut Criterion) {
         g.bench_with_input(
             BenchmarkId::new("parse_tokens", format!("{:?}", case)),
             case,
-            |b, s| b.iter(|| parse_tokens(s, |_, _| Ok(())).expect("ok")),
+            |b, s| {
+                b.iter(|| {
+                    parse_tokens::<_, _, Error>(s, |_, args| args.with_one(|_| Ok(()))).expect("ok")
+                })
+            },
         );
     }
 
