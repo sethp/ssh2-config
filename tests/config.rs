@@ -185,3 +185,61 @@ fn multi_line_quoted_token_fails() {
         .unwrap()
         .ends_with("line 1: Missing argument."));
 }
+
+#[test]
+fn comments() {
+    let dir = tempdir().unwrap();
+    let cfg_file = dir.path().join("comments");
+    fs::write(
+        &cfg_file,
+        r#"
+# this is a comment
+=# this too is a comment
+=   #comment
+hostname "example.com""#,
+    )
+    .expect("failed writing config");
+
+    let mut child = Command::new("ssh")
+        .args(&["-T", "-F", cfg_file.to_str().unwrap(), "-G", "example.com"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("failed to execute process");
+
+    child.wait().expect("child wasn't running");
+
+    let mut lines = io::BufReader::new(child.stdout.expect("no stdout")).lines();
+
+    assert_eq!(lines.nth(1).unwrap().unwrap(), "hostname example.com");
+}
+
+#[test]
+fn bad_comments() {
+    let dir = tempdir().unwrap();
+    let cfg_file = dir.path().join("bad_comment");
+    fs::write(&cfg_file, r#"hostname "example.com" # end of line comment"#)
+        .expect("failed writing config");
+
+    let mut child = Command::new("ssh")
+        .args(&["-T", "-F", cfg_file.to_str().unwrap(), "-G", "example.com"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to execute process");
+
+    let exit = child.wait().expect("child wasn't running");
+    assert!(!exit.success());
+
+    let mut lines = io::BufReader::new(child.stdout.expect("bad stdout")).lines();
+    assert!(lines.next().is_none());
+    let mut err_lines = io::BufReader::new(child.stderr.expect("bad stderr")).lines();
+
+    let err = &err_lines.next().unwrap().unwrap();
+
+    assert!(
+        err.ends_with("line 1: garbage at end of line; \"#\"."),
+        "Got: {}",
+        err
+    );
+}

@@ -415,6 +415,12 @@ impl<'a> Iterator for Tokens<'a> {
 
     fn next(&mut self) -> Option<Token<'a>> {
         match self.chars.peek()? {
+            // Comments are only valid at the beginning of the line (except for leading blanks)
+            // See: https://github.com/openssh/openssh-portable/blob/14beca57ac92d62830c42444c26ba861812dc837/readconf.c#L932
+            (0, '#') => {
+                self.chars = "".char_indices().peekable();
+                None
+            }
             (_, ch) if Tokens::DELIMITERS.contains(ch) => {
                 while let Some((_, ch)) = self.chars.peek() {
                     if !Tokens::DELIMITERS.contains(ch) {
@@ -602,6 +608,11 @@ expected: `{:?}`{}"#,
             Ok(None),
             "expected to successfully parse nothing"
         );
+        assert_matches!(
+            parse_tokens::<_, _, Error>("# comment", |_, _| Ok(())),
+            Ok(None),
+            "expected to successfully parse nothing"
+        );
 
         for spelling in &[
             r#"Hello World"#,
@@ -658,6 +669,11 @@ expected: `{:?}`{}"#,
             parse_tokens::<_, _, Error>("hello world", |_, _| Ok(()))
                 .expect_err("wanted parse error for unconsumed tokens"),
             Error::TrailingGarbage(w) => assert_eq!(w, "world")
+        );
+
+        assert_matches!(
+            parse_tokens::<_, _, Error>("key #comment", |_, _| Ok(())).expect_err("wanted parse error"),
+            Error::TrailingGarbage(w) => assert_eq!(w, "#comment")
         );
 
         assert_matches!(
