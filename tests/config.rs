@@ -75,10 +75,11 @@ fn hello_world4() {
 }
 
 #[test]
+// TODO: Github CI doesn't populate /etc/services
+#[cfg(target_os = "macos")]
 fn hello_world5() {
     let dir = tempdir().unwrap();
-    let cfg_file = dir.path().join("hello_world3_config");
-    // this is weird, but ??
+    let cfg_file = dir.path().join("hello_world5_config");
     fs::write(
         &cfg_file,
         r#"=# comment
