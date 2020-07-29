@@ -1,6 +1,5 @@
-// TODO:
-// #![warn(missing_docs)]
-#![cfg_attr(test, deny(warnings))]
+#![warn(missing_docs, unused_results)]
+// #![cfg_attr(test, deny(warnings))]
 
 use core::str::CharIndices;
 use std::fmt;
@@ -71,7 +70,7 @@ where
     F: FnOnce(&str, &mut Arguments) -> Result<T, E>,
     Error: From<E>,
 {
-    let mut args = Arguments(itertools::put_back(tokens(line)));
+    let mut args = Arguments::new(tokens(line));
     if !args.has_next() {
         return Ok(None);
     }
@@ -248,13 +247,109 @@ pub fn tokens(line: &str) -> Tokens {
 /// ```
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Token<'a> {
+    /// Ex. `KnownHostsFile` -> Word("KnownHostsFile")
     Word(&'a str),
+    /// Ex. `"KnownHostsFile"` -> Quoted("KnownHostsFile")
     Quoted(&'a str),
-    /// repeated whitespace or =
+    /// Repeated whitespace or =
     Delim,
     /// Ex. unmatched quote: `"foo` -> `Invalid("foo")`
     Invalid(&'a str),
-    // TODO Comment?
+}
+
+/// Arguments provide access to the configuration statements in a line.
+///
+/// As with many "found" languages, the SSH config language accepts some unexpected
+/// and surprising items: `Port 22` is an accepted way to spell the pair of arguments
+/// `("Port", "22")`, but so is `Po"rt"2"2"`:
+///
+/// ```
+/// use ssh2_config::option::{Arguments, tokens};
+///
+/// Arguments::new(tokens(r#"Port 22"#)).with_next(|port, args| {
+///     args.with_one(|num| Ok(assert_eq!((port, num), ("Port", "22"))))
+/// });
+///
+/// Arguments::new(tokens(r#"Po"rt"2"2""#)).with_next(|port, args| {
+///     args.with_one(|num| Ok(assert_eq!((port, num), ("Port", "22"))))
+/// });
+/// ```
+///
+/// We use closures to provide access to the arguments themselves in order to "pay for
+/// what you use" in this regard: the closure always takes a reference to a string, and
+/// in the first case where we can return pointers into the original configuration we do
+/// so. In the latter, we need to allocate (and/or modify, as upstream SSH does) in
+/// order to remove the "interior" quote, but the closure allows us to only do that
+/// additional work if the provided config requires it.
+///
+/// Arguments internally preserves the invariant that the stream does not begin with a
+/// "Delim" token, instead greedily consuming one if it exists for the preceding argument.
+pub struct Arguments<'a>(itertools::PutBack<Tokens<'a>>);
+
+impl<'a> Arguments<'a> {
+    /// new constructs a new Arguments wrapper for a stream of `Token`s
+    pub fn new(tokens: Tokens<'a>) -> Self {
+        Arguments(itertools::put_back(tokens))
+    }
+
+    /// has_next returns true if there is at least one more argument.
+    pub fn has_next(self: &mut Self) -> bool {
+        if let Some(next) = self.0.next() {
+            self.0.put_back(next);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn with_one<T, F>(self: &mut Self, f: F) -> Result<T, Error>
+    where
+        F: FnOnce(&str) -> Result<T, Error>,
+    {
+        self.with_next(|a, _| f(a))
+    }
+
+    // comparable to strdelim
+    pub fn with_next<T, F>(self: &mut Self, f: F) -> Result<T, Error>
+    where
+        F: FnOnce(&str, &mut Self) -> Result<T, Error>,
+    {
+        use Token::*;
+
+        match self.0.next() {
+            None => Err(Error::MissingArgument),
+            Some(Word(w)) => match self.0.next() {
+                None | Some(Delim) => f(w, self),
+                Some(Quoted(q)) => {
+                    let arg = format!("{}{}", w, q);
+                    match self.0.next() {
+                        None | Some(Delim) => f(&arg, self),
+                        Some(next @ Word(_)) | Some(next @ Quoted(_)) => {
+                            self.0.put_back(next);
+                            f(&arg, self)
+                        }
+                        Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
+                    }
+                }
+                // We can't see back-to-back word tokens
+                Some(Word(_)) => unreachable!(),
+                Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
+            },
+            Some(Quoted(w)) => match self.0.next() {
+                None | Some(Delim) => f(w, self),
+                Some(next @ Quoted(_)) | Some(next @ Word(_)) => {
+                    self.0.put_back(next);
+                    f(w, self)
+                }
+                Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
+            },
+
+            // We can't start with a Delim token, and the invariant is that we never leave a Delim at the
+            // beginning of the stream
+            Some(Delim) => unreachable!("invalid Delim at beginning of token stream"),
+            Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
+        }
+    }
 }
 
 /// An iterator of [`Token`]s created with the method [`tokens`].
@@ -300,114 +395,6 @@ impl<'a> Tokens<'a> {
     ///
     /// [readconfig.c]: https://github.com/openssh/openssh-portable/blob/14beca57ac92d62830c42444c26ba861812dc837/readconf.c#L916-L923
     pub const EOL_BLANK: &'static [char] = &[' ', '\t', '\r', '\x0c' /* form feed */];
-
-    pub fn with_one_arg<T, F>(toks: &mut dyn Iterator<Item = Token<'a>>, f: F) -> Result<T, Error>
-    where
-        F: FnOnce(&str) -> Result<T, Error>,
-    {
-        Tokens::with_args(toks, |a, _| f(a))
-    }
-
-    // comparable to strdelim
-    pub fn with_args<T, F>(toks: &mut dyn Iterator<Item = Token<'a>>, f: F) -> Result<T, Error>
-    where
-        F: FnOnce(&str, &mut dyn Iterator<Item = Token<'a>>) -> Result<T, Error>,
-    {
-        use Token::*;
-
-        match toks.next() {
-            None => Err(Error::MissingArgument),
-            Some(Word(w)) => match toks.next() {
-                None | Some(Delim) => f(w, toks),
-                Some(Quoted(q)) => {
-                    let arg = format!("{}{}", w, q);
-                    match toks.next() {
-                        None | Some(Delim) => f(&arg, toks),
-                        Some(next @ Word(_)) | Some(next @ Quoted(_)) => {
-                            f(&arg, &mut itertools::put_back(toks).with_value(next))
-                        }
-                        Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
-                    }
-                }
-                // We can't see back-to-back word tokens
-                Some(Word(_)) => unreachable!(),
-                Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
-            },
-            Some(Quoted(w)) => match toks.next() {
-                None | Some(Delim) => f(w, toks),
-                Some(next @ Quoted(_)) | Some(next @ Word(_)) => {
-                    f(w, &mut itertools::put_back(toks).with_value(next))
-                }
-                Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
-            },
-
-            // We can't start with a Delim token, and the invariant is that we never leave a Delim at the
-            // beginning of the stream
-            Some(Delim) => unreachable!("invalid Delim at beginning of token stream"),
-            Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
-        }
-    }
-}
-
-pub struct Arguments<'a>(itertools::PutBack<Tokens<'a>>);
-
-impl<'a> Arguments<'a> {
-    pub fn has_next(self: &mut Self) -> bool {
-        if let Some(next) = self.0.next() {
-            self.0.put_back(next);
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn with_one<T, F>(self: &mut Self, f: F) -> Result<T, Error>
-    where
-        F: FnOnce(&str) -> Result<T, Error>,
-    {
-        self.with_next(|a, _| f(a))
-    }
-
-    pub fn with_next<T, F>(self: &mut Self, f: F) -> Result<T, Error>
-    where
-        F: FnOnce(&str, &mut Self) -> Result<T, Error>,
-    {
-        use Token::*;
-
-        match self.0.next() {
-            None => Err(Error::MissingArgument),
-            Some(Word(w)) => match self.0.next() {
-                None | Some(Delim) => f(w, self),
-                Some(Quoted(q)) => {
-                    let arg = format!("{}{}", w, q);
-                    match self.0.next() {
-                        None | Some(Delim) => f(&arg, self),
-                        Some(next @ Word(_)) | Some(next @ Quoted(_)) => {
-                            self.0.put_back(next);
-                            f(&arg, self)
-                        }
-                        Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
-                    }
-                }
-                // We can't see back-to-back word tokens
-                Some(Word(_)) => unreachable!(),
-                Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
-            },
-            Some(Quoted(w)) => match self.0.next() {
-                None | Some(Delim) => f(w, self),
-                Some(next @ Quoted(_)) | Some(next @ Word(_)) => {
-                    self.0.put_back(next);
-                    f(w, self)
-                }
-                Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
-            },
-
-            // We can't start with a Delim token, and the invariant is that we never leave a Delim at the
-            // beginning of the stream
-            Some(Delim) => unreachable!("invalid Delim at beginning of token stream"),
-            Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
-        }
-    }
 }
 
 impl<'a> Iterator for Tokens<'a> {
@@ -426,18 +413,18 @@ impl<'a> Iterator for Tokens<'a> {
                     if !Tokens::DELIMITERS.contains(ch) {
                         break;
                     }
-                    self.chars.next();
+                    let _ = self.chars.next();
                 }
                 Some(Token::Delim)
             }
             (start, '"') => {
                 let start = start + '"'.len_utf8();
-                self.chars.next();
+                let _ = self.chars.next();
                 while let Some((_, ch)) = self.chars.peek() {
                     if *ch == '"' || *ch == '\n' {
                         break;
                     }
-                    self.chars.next();
+                    let _ = self.chars.next();
                 }
                 if let Some((i, _)) = self.chars.peek() {
                     let end = *i;
@@ -460,7 +447,7 @@ impl<'a> Iterator for Tokens<'a> {
                         end = *i;
                         break;
                     }
-                    self.chars.next();
+                    let _ = self.chars.next();
                 }
                 Some(Token::Word(&self.line[start..end]))
             }

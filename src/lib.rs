@@ -13,19 +13,22 @@
 
 // TODO
 // #![doc(html_root_url = "https://docs.rs/ssh2-config")]
-// #![deny(missing_docs, unused_results)]
+#![deny(missing_docs, unused_results)]
 #![cfg_attr(test, deny(warnings))]
 
 #[cfg(test)]
 #[macro_use]
 extern crate assert_matches;
 
+/// Individual SSH config options, e.g. `Port 22` or `Hostname example.com`
 pub mod option;
 
 // https://man.openbsd.org/OpenBSD-current/man5/ssh_config.5
 
+#[allow(missing_docs)]
 pub struct SSHConfig {}
 
+#[allow(missing_docs)]
 impl SSHConfig {
     pub fn for_host(_: &str) -> SSHConfig {
         unimplemented!()
