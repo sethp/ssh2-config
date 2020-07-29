@@ -211,7 +211,7 @@ pub fn tokens(line: &str) -> Tokens {
         .trim_start_matches(Tokens::BLANK)
         .trim_end_matches(Tokens::EOL_BLANK);
     Tokens {
-        line: line,
+        line,
         // matcher: line.match_indices(Tokens::CHARS),
         // last_match: None,
         chars: line.char_indices().peekable(),
