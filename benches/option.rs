@@ -19,11 +19,7 @@ pub fn bench_parse_tokens(c: &mut Criterion) {
         g.bench_with_input(
             BenchmarkId::new("parse_tokens", format!("{:?}", case)),
             case,
-            |b, s| {
-                b.iter(|| {
-                    parse_tokens::<_, _, Error>(s, |_, args| args.with_one(|_| Ok(()))).expect("ok")
-                })
-            },
+            |b, s| b.iter(|| parse_tokens(s, |_, args| args.with_one(|_| Ok(()))).expect("ok")),
         );
     }
 
