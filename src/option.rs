@@ -1,5 +1,5 @@
 #![warn(missing_docs, unused_results)]
-// #![cfg_attr(test, deny(warnings))]
+#![cfg_attr(test, deny(warnings))]
 
 use core::str::CharIndices;
 use std::fmt;
@@ -7,19 +7,53 @@ use std::iter::Peekable;
 #[allow(unused)]
 use std::str::MatchIndices;
 
+/// SSHOption represents a single configuration parameter.
+///
+/// For details on the individual meaning of these options, see [ssh_config(5)][0].
+///
+/// [0]: https://man.openbsd.org/OpenBSD-current/man5/ssh_config.5
 #[derive(Debug, PartialEq, Eq)]
+#[allow(missing_docs)]
 #[non_exhaustive]
 pub enum SSHOption {
     User(String),
     Port(u16),
+    Hostname(String),
 }
 
+/// parse_opt reads a single option from a single line of config.
+///
+/// The ssh_config format is entirely line-oriented (no option may span multiple lines), so it's best to use
+/// this in coordination with [`str::lines`]. This function returns `Result<Option<_>, _>` as it is possible
+/// to successfully parse no option from either a comment or a blank line.
+///
+/// [`str::lines`]: https://doc.rust-lang.org/std/primitive.str.html#method.lines
+///
+/// # Example
+///
+/// ```
+/// use ssh2_config::option::{parse_opt, SSHOption};
+///
+/// let opts: Result<Vec<_>, _> = r#"# a comment
+/// Hostname example.com
+/// Port 22
+/// "#
+///     .lines()
+///     .filter_map(|line| parse_opt(line).transpose())
+///     .collect();
+///
+/// assert_eq!(
+///     opts.unwrap(),
+///     vec![SSHOption::Hostname(String::from("example.com")), SSHOption::Port(22)],
+/// );
+/// ```
 pub fn parse_opt(line: &str) -> Result<Option<SSHOption>, Error> {
     // TODO: it's a context-sensitive grammar for UserKnownHostsFile, GlobalKnownHostsFile, and RekeyLimit.
     use SSHOption::*;
     parse_tokens(line, |keyword, args| match keyword {
         "user" => args.with_one(|arg| Ok(User(arg.to_owned()))),
         "port" => args.with_one(|arg| Ok(Port(arg.parse().map_err(DetailedError::InvalidPort)?))),
+        "hostname" => args.with_one(|arg| Ok(Hostname(arg.to_owned()))),
         _ => Err(Error::from(DetailedError::BadOption(keyword.to_string()))),
     })
 }
@@ -27,8 +61,6 @@ pub fn parse_opt(line: &str) -> Result<Option<SSHOption>, Error> {
 impl std::str::FromStr for SSHOption {
     type Err = Error;
 
-    // TODO multi-line?
-    // TODO: docs (?)
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match parse_opt(s).transpose() {
             Some(res) => res,
@@ -61,10 +93,10 @@ impl std::str::FromStr for SSHOption {
 /// we avoid handling of arbitrary unicode code points in the key portion of the line.
 ///
 /// Note also that there are some unexpected arrangements of tokens that ssh will accept. For more
-/// information on these, see [TODO] and [`Token`].
+/// information on these, see [`Arguments`] and [`Token`].
 ///
-/// [TODO]: link to the parse / FromStr impl?
-/// [Token]: crate::option::Token
+/// [`Arguments`]: crate::option::Arguments
+/// [`Token`]: crate::option::Token
 pub fn parse_tokens<T, F, E>(line: &str, f: F) -> Result<Option<T>, Error>
 where
     F: FnOnce(&str, &mut Arguments) -> Result<T, E>,
@@ -113,9 +145,13 @@ pub enum Error {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum DetailedError {
+    /// UnsupportedOption occurs when an option was recognized as no longer supported.
     UnsupportedOption(String),
+    /// BadOption occurs when we encounter an unknown or misspelled option.
     BadOption(String),
 
+    /// InvalidPort occurs when we encounter a port that can't be recognize, e.g. `Port -1`
+    // TODO: getservfromname
     InvalidPort(std::num::ParseIntError),
 }
 
@@ -160,13 +196,13 @@ impl From<DetailedError> for Error {
 /// `tokens` converts a string into an iterator of [`Token`s], intended for use with [`str::lines`].
 ///
 /// These token streams are not complete, choosing to omit beginning- and end-of-line blank characters as
-/// these have no semantic importance to the format. For more details on the SSH option format, see [`Token`]
-/// and [TODO].
+/// these have no semantic importance to the format. For more details on the SSH option format, see [`Arguments`]
+/// and [`Token`].
 ///
 /// [`Token`s]: crate::option::Token
 /// [`Token`]: crate::option::Token
 /// [`str::lines`]: https://doc.rust-lang.org/std/primitive.str.html#method.lines
-/// [TODO]: link to the parse / FromStr impl?
+/// [`Arguments`]: crate::option::Arguments
 ///
 /// # Example
 ///
@@ -286,6 +322,7 @@ pub enum Token<'a> {
 /// "Delim" token, instead greedily consuming one if it exists for the preceding argument.
 pub struct Arguments<'a>(itertools::PutBack<Tokens<'a>>);
 
+#[allow(missing_docs)] // TODO
 impl<'a> Arguments<'a> {
     /// new constructs a new Arguments wrapper for a stream of `Token`s
     pub fn new(tokens: Tokens<'a>) -> Self {
