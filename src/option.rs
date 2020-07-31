@@ -87,7 +87,9 @@ impl std::str::FromStr for SSHOption {
 /// .expect("nothing found");
 /// ```
 ///
-/// `parse_tokens` will also check that all of the tokens from the line are fully consumed, as does ssh.
+/// `parse_tokens` will also check that either all of the tokens from a line are consumed, or, for
+/// compatibility reasons, that the next unconsumed token is empty. Also for compatibility reasons, lines
+/// beginning with two empty arguments are considered entirely empty.
 ///
 /// Note that, since all of the known ssh option keywords are exclusively in the ASCII character space,
 /// we avoid handling of arbitrary unicode code points in the key portion of the line.
@@ -107,12 +109,33 @@ where
         return Ok(None);
     }
 
-    let res = args.with_next(|k, args| Ok(f(&k.to_ascii_lowercase(), args)?))?;
+    let res = args.with_next(|k, args| {
+        // COMPAT: consider a line with two empty keywords to be blank
+        if !k.is_empty() {
+            Ok(Some(f(&k.to_ascii_lowercase(), args)?))
+        } else {
+            // Skip one empty keyword, give up after two
+            args.with_next(|k, args| {
+                if !k.is_empty() {
+                    Ok(Some(f(&k.to_ascii_lowercase(), args)?))
+                } else {
+                    Ok(None)
+                }
+            })
+        }
+        // END COMPAT
+    })?;
+
+    if res.is_none() {
+        return Ok(None);
+    }
 
     match args.0.next() {
-        None => Ok(Some(res)),
-        // something something never leave a delim at beginning of stream
-        Some(Token::Delim) => unreachable!(),
+        None => Ok(res),
+        // COMPAT: allow anything following an "empty" arguments
+        Some(Token::Delim) => Ok(res),
+        Some(Token::Word(s)) | Some(Token::Quoted(s)) if s.is_empty() => Ok(res),
+        // END COMPAT
         Some(Token::Word(s)) | Some(Token::Quoted(s)) => Err(Error::TrailingGarbage(s.to_owned())),
         Some(Token::Invalid(s)) => Err(Error::UnmatchedQuote(s.to_owned())),
     }
@@ -195,9 +218,12 @@ impl From<DetailedError> for Error {
 
 /// `tokens` converts a string into an iterator of [`Token`s], intended for use with [`str::lines`].
 ///
-/// These token streams are not complete, choosing to omit beginning- and end-of-line blank characters as
-/// these have no semantic importance to the format. For more details on the SSH option format, see [`Arguments`]
+/// These token streams are not complete, choosing to omit end-of-line blank characters as these have
+/// no semantic importance to the format. For more details on the SSH option format, see [`Arguments`]
 /// and [`Token`].
+///
+/// Note: In order to maintain compatibility with some of the more unusual parts of the config language,
+/// we interpret the digraph `"=` (closing-quote-equals) as being a blank `Word("")`.
 ///
 /// [`Token`s]: crate::option::Token
 /// [`Token`]: crate::option::Token
@@ -287,7 +313,7 @@ pub enum Token<'a> {
     Word(&'a str),
     /// Ex. `"KnownHostsFile"` -> Quoted("KnownHostsFile")
     Quoted(&'a str),
-    /// Repeated whitespace or =
+    /// Repeated blanks, including at most one `=`
     Delim,
     /// Ex. unmatched quote: `"foo` -> `Invalid("foo")`
     Invalid(&'a str),
@@ -380,10 +406,7 @@ impl<'a> Arguments<'a> {
                 }
                 Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
             },
-
-            // We can't start with a Delim token, and the invariant is that we never leave a Delim at the
-            // beginning of the stream
-            Some(Delim) => unreachable!("invalid Delim at beginning of token stream"),
+            Some(Delim) => f("", self),
             Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
         }
     }
@@ -411,9 +434,7 @@ impl<'a> Tokens<'a> {
     ///
     /// [0]: crate::Token::Delim
     /// [1]: https://github.com/openssh/openssh-portable/blob/e073106f370cdd2679e41f6f55a37b491f0e82fe/misc.c#L329
-    pub const DELIMITERS: &'static [char] = &[
-        ' ', '\t', '=', /* for convenience we accept even when there's more than one */
-    ];
+    pub const DELIMITERS: &'static [char] = &[' ', '\t' /* TODO: \r? */];
 
     /// Blanks are a superset of Delimiters that are considered "ignorable," but only when they appear at
     /// the beginning of a line.
@@ -421,9 +442,9 @@ impl<'a> Tokens<'a> {
     /// Note that we differ from [upstream] by omitting the newline `'\n'` character from this set.
     ///
     /// [upstream]: https://github.com/openssh/openssh-portable/blob/e073106f370cdd2679e41f6f55a37b491f0e82fe/misc.c#L323-L325
-    pub const BLANK: &'static [char] = &[' ', '\t', '\r', '=' /* treat as blank */];
+    pub const BLANK: &'static [char] = &[' ', '\t', '\r'];
 
-    /// EOL blanks are a distinct set of characters that are "ignorable" at the end of a line.
+    /// EOL blanks are the set of characters that are "ignorable" at the end of a line.
     ///
     /// Notably this includes the "form feed" character, as well as repeated carriage returns. We don't include
     /// the newline (`'\n'`) character in this set, however.
@@ -445,11 +466,20 @@ impl<'a> Iterator for Tokens<'a> {
                 self.chars = "".char_indices().peekable();
                 None
             }
-            (_, ch) if Tokens::DELIMITERS.contains(ch) => {
+            (i, ch) if Tokens::DELIMITERS.contains(ch) || *ch == '=' => {
+                // Only blanks are "delimiters" after a `"`
+                let mut eq = *i > '"'.len_utf8()
+                    && &self.line.as_bytes()[i - '"'.len_utf8()..*i] == "\"".as_bytes();
+                if *ch == '=' && eq {
+                    // "= digraph
+                    let _ = self.chars.next();
+                    return Some(Token::Word(""));
+                }
                 while let Some((_, ch)) = self.chars.peek() {
-                    if !Tokens::DELIMITERS.contains(ch) {
+                    if !Tokens::DELIMITERS.contains(ch) && (*ch != '=' || eq) {
                         break;
                     }
+                    eq = eq || *ch == '=';
                     let _ = self.chars.next();
                 }
                 Some(Token::Delim)
@@ -463,9 +493,7 @@ impl<'a> Iterator for Tokens<'a> {
                     }
                     let _ = self.chars.next();
                 }
-                if let Some((i, _)) = self.chars.peek() {
-                    let end = *i;
-                    let ch = self.chars.next().unwrap().1;
+                if let Some((end, ch)) = self.chars.next() {
                     let tok = &self.line[start..end];
                     Some(if ch == '"' {
                         Token::Quoted(tok)
@@ -480,7 +508,7 @@ impl<'a> Iterator for Tokens<'a> {
                 let start = *start;
                 let mut end = self.line.len();
                 while let Some((i, ch)) = self.chars.peek() {
-                    if Tokens::DELIMITERS.contains(ch) || *ch == '"' {
+                    if Tokens::DELIMITERS.contains(ch) || *ch == '"' || *ch == '=' {
                         end = *i;
                         break;
                     }
@@ -496,107 +524,114 @@ impl<'a> Iterator for Tokens<'a> {
 mod test {
     use super::SSHOption;
     use super::Token::*;
-    use super::{parse_tokens, tokens, Error, Token};
+    use super::{parse_tokens, tokens, Error};
     use itertools::Itertools;
 
     #[test]
     fn test_tokens() {
-        struct TestCase {
-            input: &'static str,
-            expect: Vec<Token<'static>>,
-            message: Option<&'static str>,
-        }
-
         macro_rules! case {
             {input: $left:expr, expect: $right:expr} => ({
-                TestCase {
-                    input: $left,
-                    expect: $right,
-                    message: None,
-                }
+                case!($left, $right, None)
             });
             {input: $left:expr, expect: $right:expr,} => ({
-                case!{ input: $left, expect: $right }
+                case!($left, $right, None)
             });
             {input: $left:expr, expect: $right:expr, message: $msg:expr} => ({
-                TestCase{
-                    input: $left,
-                    expect: $right,
-                    message: Some($msg),
-                }
+                case!($left, $right, Some($msg))
             });
             {input: $left:expr, expect: $right:expr, message: $msg:expr,} => ({
-                case!{ input: $left, expect: $right, message: $msg }
+                case!($left, $right, Some($msg))
+            });
+            ($input:expr, $expect:expr, $msg:expr) => ({
+                match ($input, $expect, $msg) {
+                    (input, expect, message) => {
+                        let mut out = tokens(input);
+                        let actual = out.by_ref().take(expect.len() + 1).collect::<Vec<_>>();
+                        let more = out.next().is_some();
+                        assert!(
+                            actual == expect && !more,
+                            r#"assertion failed: `tokens({:?}) == expected`
+              actual: `[{:?}{}]`,
+            expected: `{:?}`{}"#,
+                            input,
+                            actual.iter().format(", "),
+                            if more { ", .." } else { "" },
+                            expect,
+                            message
+                                .map(|e: &str| format!(": {}", e))
+                                .unwrap_or("".to_string()),
+                        );
+                    }
+                }
             });
         }
 
-        for tc in &[
-            case! {
-                input: "",
-                expect: vec![],
-            },
-            case! {
-                input: "key",
-                expect: vec![Word("key")],
-            },
-            case! {
-                input: "key val",
-                expect: vec![Word("key"), Delim, Word("val")],
-            },
-            case! {
-                input: "key=val",
-                expect: vec![Word("key"), Delim, Word("val")],
-            },
-            case! {
-                input: "=key val",
-                expect: vec![Word("key"), Delim, Word("val")],
-                message: "tokens should omit leading delimiters",
-            },
-            case! {
-                input: "key val\t\r\x0c",
-                expect: vec![Word("key"), Delim, Word("val")],
-                message: "tokens should omit trailing blanks",
-            },
-            case! {
-                // TODO: check this against whether ssh finds "garbage" in this case
-                input: "key val=",
-                expect: vec![Word("key"), Delim, Word("val"), Delim],
-                message: "tokens should preserve trailing `=`s",
-            },
-            case! {
-                input: "key \"val\"",
-                expect: vec![Word("key"), Delim, Quoted("val")],
-            },
-            case! {
-                input: "w1\"w2\"",
-                expect: vec![Word("w1"), Quoted("w2")],
-            },
-            case! {
-                input: "\"w1",
-                expect: vec![Invalid("w1")],
-            },
-            case! {
-                input: "\"\"",
-                expect: vec![Quoted("")],
-            },
-        ] {
-            let mut out = tokens(tc.input);
-            let actual = out.by_ref().take(tc.expect.len() + 1).collect::<Vec<_>>();
-            let more = out.next().is_some();
-
-            assert!(
-                actual == tc.expect && !more,
-                r#"assertion failed: `tokens(input) == expected`
-  actual: `[{:?}{}]`,
-expected: `{:?}`{}"#,
-                actual.iter().format(", "),
-                if more { ", .." } else { "" },
-                tc.expect,
-                tc.message
-                    .map(|e| format!(": {}", e))
-                    .unwrap_or("".to_string()),
-            );
-        }
+        case! {
+            input: "",
+            expect: vec![],
+        };
+        case! {
+            input: "key",
+            expect: vec![Word("key")],
+        };
+        case! {
+            input: "key val",
+            expect: vec![Word("key"), Delim, Word("val")],
+        };
+        case! {
+            input: "key=val",
+            expect: vec![Word("key"), Delim, Word("val")],
+        };
+        case! {
+            input: "key==val",
+            expect: vec![Word("key"), Delim, Delim, Word("val")],
+        };
+        case! {
+            input: "key=      =val",
+            expect: vec![Word("key"), Delim, Delim, Word("val")],
+        };
+        case! {
+            input: "=key val",
+            expect: vec![Delim, Word("key"), Delim, Word("val")],
+            message: "tokens should not omit leading delimiters",
+        };
+        case! {
+            input: "key val\t\r\x0c",
+            expect: vec![Word("key"), Delim, Word("val")],
+            message: "tokens should omit trailing blanks",
+        };
+        case! {
+            input: "key val=",
+            expect: vec![Word("key"), Delim, Word("val"), Delim],
+            message: "tokens should preserve trailing `=`s",
+        };
+        case! {
+            input: "key \"val\"",
+            expect: vec![Word("key"), Delim, Quoted("val")],
+        };
+        case! {
+            input: "w1\"w2\"",
+            expect: vec![Word("w1"), Quoted("w2")],
+        };
+        case! {
+            input: "\"w1",
+            expect: vec![Invalid("w1")],
+        };
+        case! {
+            input: "\"\"",
+            expect: vec![Quoted("")],
+        };
+        // These two corner cases are unfortunate
+        case! {
+            input: "\"key\" =val",
+            expect: vec![Quoted("key"), Delim, Delim, Word("val")],
+            message: "quotes don't greedily consume following =, only blanks",
+        };
+        case! {
+            input: "\"key\"=val",
+            expect: vec![Quoted("key"), Word(""), Word("val")],
+            message: "we invent a zero-width Word for the digraph \"=`",
+        };
     }
 
     #[test]
@@ -675,7 +710,6 @@ expected: `{:?}`{}"#,
         .expect("parse failed")
         .expect("nothing found");
 
-        // TODO: is this one ok?
         parse_tokens::<_, _, Error>("hello=", |k, _| Ok(assert_eq!(k, "hello")))
             .expect("wanted to skip trailing delimiter(s)")
             .expect("nothing found");
