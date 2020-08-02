@@ -468,8 +468,8 @@ impl<'a> Iterator for Tokens<'a> {
             }
             (i, ch) if Tokens::DELIMITERS.contains(ch) || *ch == '=' => {
                 // Only blanks are "delimiters" after a `"`
-                let mut eq = *i > '"'.len_utf8()
-                    && &self.line.as_bytes()[i - '"'.len_utf8()..*i] == "\"".as_bytes();
+                let mut eq =
+                    *i > '"'.len_utf8() && &self.line.as_bytes()[i - '"'.len_utf8()..*i] == b"\"";
                 if *ch == '=' && eq {
                     // "= digraph
                     let _ = self.chars.next();
@@ -551,8 +551,8 @@ mod test {
                         assert!(
                             actual == expect && !more,
                             r#"assertion failed: `tokens({:?}) == expected`
-              actual: `[{:?}{}]`,
-            expected: `{:?}`{}"#,
+   actual: `[{:?}{}]`,
+ expected: `{:?}`{}"#,
                             input,
                             actual.iter().format(", "),
                             if more { ", .." } else { "" },
@@ -774,5 +774,219 @@ mod test {
         assert_parse!(r#"Port 22"#, SSHOption::Port(22));
         // TODO: getservbyname
         // assert_parse!(r#"Port ssh"#, SSHOption::Port(22));
+    }
+}
+
+/// the simple module provides a simplified `ssh_config(5)` language that is expected to cover almost
+/// all real-word configuration.
+///
+/// The grammar for the simplified language is as follows:
+///
+/// ```ebnf
+/// config : line + ;
+/// line : key [ blank + arg | blank * quoted ] + 32 '\r' ? '\n' ;
+/// key : ASCII_ALPHA + ;
+/// quoted : '"' NON_QUOTE * '"' ;
+/// blank : ' ' | '\t' | '=' ;
+/// arg : [ NON_BLANK | NON_QUOTE ] + ;
+/// ```
+///
+/// where:
+///  * ASCII_ALPHA is any character in the English ASCII alphabet range: [a-zA-Z]
+///  * NON_QUOTE is any character besides `"`
+///  * NON_BLANK is any character besides `blank`
+pub mod simple {
+    pub use super::Error;
+    use core::str::CharIndices;
+    use std::iter::Peekable;
+
+    /// An iterator of [`&str`]s created with the method [`tokens`].
+    ///
+    /// [`tokens`]: crate::option::simple::tokens
+    pub struct Tokens<'a> {
+        line: &'a str,
+        chars: Peekable<CharIndices<'a>>,
+    }
+
+    impl<'a> Tokens<'a> {
+        const BLANK: &'static [char] = &[' ', '\t', '='];
+
+        fn peeking_find<P>(&mut self, predicate: P) -> Option<&(usize, char)>
+        where
+            P: Fn(&(usize, char)) -> bool,
+        {
+            while let Some(e) = self.chars.peek() {
+                if predicate(e) {
+                    break;
+                }
+                let _ = self.chars.next();
+            }
+            self.chars.peek()
+        }
+    }
+
+    /// `tokens` converts a string into an iterator of [`&str`s], intended for use with [`str::lines`].
+    ///
+    /// Note that it does not handle carriage return (`\r`) or new
+    ///
+    /// [`str::lines`]: https://doc.rust-lang.org/std/primitive.str.html#method.lines
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use ssh2_config::option::simple;
+    /// use ssh2_config::option::simple::Error;
+    ///
+    /// assert_eq!(
+    ///     "hello\nworld"
+    ///         .lines()
+    ///         .flat_map(simple::tokens)
+    ///         .collect::<Result<Vec<_>, Error>>()
+    ///         .unwrap(),
+    ///     vec!["hello", "world"]
+    /// );
+    /// ```
+    pub fn tokens(line: &str) -> Tokens {
+        let line = line
+            .trim_start_matches(Tokens::BLANK)
+            .trim_end_matches(Tokens::BLANK);
+        Tokens {
+            line,
+            chars: line.char_indices().peekable(),
+        }
+    }
+
+    impl<'a> Iterator for Tokens<'a> {
+        type Item = Result<&'a str, Error>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            match self.chars.next()? {
+                // Comments are only valid at the beginning of the line (except for leading blanks)
+                // See: https://github.com/openssh/openssh-portable/blob/14beca57ac92d62830c42444c26ba861812dc837/readconf.c#L932
+                (0, '#') => {
+                    self.chars = "".char_indices().peekable();
+                    None
+                }
+                (start, '"') => {
+                    let start = start + '"'.len_utf8();
+                    if let Some((end, ch)) = self.chars.find(|(_, ch)| ch == &'"' || ch == &'\n') {
+                        let tok = &self.line[start..end];
+                        Some(if ch == '"' {
+                            Ok(tok)
+                        } else {
+                            Err(Error::UnmatchedQuote(tok.to_owned()))
+                        })
+                    } else {
+                        Some(Err(Error::UnmatchedQuote(self.line[start..].to_owned())))
+                    }
+                }
+                (start, _) => {
+                    let end = self
+                        .peeking_find(|(_, ch)| Tokens::BLANK.contains(ch) || ch == &'"')
+                        .map(|&(idx, _)| idx)
+                        .unwrap_or_else(|| self.line.len());
+
+                    let _ = self.peeking_find(|(_, ch)| !Tokens::BLANK.contains(ch) || ch == &'"');
+
+                    Some(Ok(&self.line[start..end]))
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod test {
+        use super::tokens;
+        use itertools::Itertools;
+
+        #[test]
+        fn test_tokens() {
+            macro_rules! case {
+                ({input: $left:expr, expect: $right:expr}) => {{
+                    case!($left, $right, None)
+                }};
+                ({input: $left:expr, expect: $right:expr,}) => {{
+                    case!($left, $right, None)
+                }};
+                ({input: $left:expr, expect: $right:expr, message: $msg:expr}) => {{
+                    case!($left, $right, Some($msg))
+                }};
+                ({input: $left:expr, expect: $right:expr, message: $msg:expr,}) => {{
+                    case!($left, $right, Some($msg))
+                }};
+                ($input:expr, $expect:expr, $msg:expr) => {{
+                    let (input, expect, message): (_, Vec<&str>, _) = ($input, $expect, $msg);
+                    let mut out = tokens(input);
+                    let actual = out
+                        .by_ref()
+                        .take(expect.len() + 1)
+                        .collect::<Result<Vec<_>, _>>()
+                        .expect("got invalid token");
+                    let more = out.next().is_some();
+                    assert!(
+                        actual == expect && !more,
+                        r#"assertion failed: `tokens({:?}) == expected`
+   actual: `[{:?}{}]`,
+ expected: `{:?}`{}"#,
+                        input,
+                        actual.iter().format(", "),
+                        if more { ", .." } else { "" },
+                        expect,
+                        message
+                            .map(|e: &str| format!(": {}", e))
+                            .unwrap_or("".to_string()),
+                    );
+                }};
+            }
+
+            case! ({
+                input: "",
+                expect: vec![],
+            });
+            case! ({
+                input: "key",
+                expect: vec!["key"],
+            });
+            case! ({
+                input: "key val",
+                expect: vec!["key", "val"],
+            });
+            case! ({
+                input: "key\tval",
+                expect: vec!["key", "val"],
+            });
+            case! ({
+                input: "key \t val",
+                expect: vec!["key", "val"],
+            });
+            case! ({
+                input: "key=val",
+                expect: vec!["key", "val"],
+            });
+            case! ({
+                input: "key==val",
+                expect: vec!["key", "val"],
+                message: "the simplified language considers `=` equivalent to any other blank",
+            });
+            case! ({
+                input: "     key=      =val   ",
+                expect: vec!["key", "val"],
+                message: "both leading and trailing blanks should be stripped",
+            });
+            case! ({
+                input: "key \"val\"",
+                expect: vec!["key", "val"],
+            });
+            case! ({
+                input: "key\"val1\"val2",
+                expect: vec!["key", "val1", "val2"],
+                message: "the simplified language breaks on quotes",
+            });
+            case! ({
+                input: "key\"\"val",
+                expect: vec!["key", "", "val"],
+                message: "the simplified language breaks on quotes",
+            });
+        }
     }
 }
