@@ -100,10 +100,8 @@ fn a2port(s: &str) -> Result<u16, std::num::ParseIntError> {
         res @ Ok(_) => res,
         num_err @ Err(_) => match CString::new(s) {
             Ok(cstr) => unsafe {
-                let servent = getservbyname(
-                    cstr.as_ptr(),
-                    CString::new("tcp").expect("CString::new failed").as_ptr(),
-                );
+                let tcp = CString::new("tcp").expect("CString::new failed");
+                let servent = getservbyname(cstr.as_ptr(), tcp.as_ptr());
                 if servent.is_null() {
                     num_err
                 } else {
