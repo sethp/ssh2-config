@@ -48,13 +48,8 @@ pub enum SSHOption {
 /// );
 /// ```
 pub fn parse_opt(line: &str) -> Result<Option<SSHOption>, Error> {
-    // TODO: it's a context-sensitive grammar for UserKnownHostsFile, GlobalKnownHostsFile, and RekeyLimit.
-    use SSHOption::*;
-    parse_tokens(line, |keyword, args| match keyword {
-        "user" => args.with_one(|arg| Ok(User(arg.to_owned()))),
-        "port" => args.with_one(|arg| Ok(Port(arg.parse().map_err(DetailedError::InvalidPort)?))),
-        "hostname" => args.with_one(|arg| Ok(Hostname(arg.to_owned()))),
-        _ => Err(Error::from(DetailedError::BadOption(keyword.to_string()))),
+    parse_tokens(line, |keyword, args| {
+        std::convert::TryFrom::try_from((keyword, args))
     })
 }
 
@@ -69,17 +64,36 @@ impl std::str::FromStr for SSHOption {
     }
 }
 
+impl<A> std::convert::TryFrom<(&str, &mut A)> for SSHOption
+where
+    A: Arguments,
+{
+    type Error = Error;
+
+    fn try_from((keyword, args): (&str, &mut A)) -> Result<Self, Self::Error> {
+        // TODO: it's a context-sensitive grammar for UserKnownHostsFile, GlobalKnownHostsFile, and RekeyLimit.
+        use SSHOption::*;
+
+        match keyword.to_ascii_lowercase().as_str() {
+            "user" => args.map_owned(User),
+            "port" => args.map_next(|arg, _| Ok(Port(arg.parse()?))),
+            "hostname" => args.map_owned(Hostname),
+
+            _ => Err(Error::from(DetailedError::BadOption(keyword.to_string()))),
+        }
+    }
+}
+
 /// Accepts a line and calls the provided closure with exactly one tokenized option.
 ///
-/// It normalizes the tokens into a canonical representation by handling quoted segments,
-/// and lower-casing the key:
+/// It normalizes the tokens into single argument form by handling quoted segments:
 ///
 /// ```
-/// use ssh2_config::option::{Error, parse_tokens, Token, Tokens};
+/// use ssh2_config::option::{Arguments, Error, parse_tokens, Token, Tokens};
 ///
-/// parse_tokens::<_, _, Error>(r#""OPTION" "Hello There""#, |opt, args| {
+/// parse_tokens::<_, _, Error>(r#""option" "Hello There""#, |opt, args| {
 ///     assert_eq!(opt, "option");
-///     args.with_one(|val| {
+///     args.map_next(|val, _| {
 ///         Ok(assert_eq!(val, "Hello There"))
 ///     })
 /// })
@@ -95,29 +109,29 @@ impl std::str::FromStr for SSHOption {
 /// we avoid handling of arbitrary unicode code points in the key portion of the line.
 ///
 /// Note also that there are some unexpected arrangements of tokens that ssh will accept. For more
-/// information on these, see [`Arguments`] and [`Token`].
+/// information on these, see [`Args`] and [`Token`].
 ///
-/// [`Arguments`]: crate::option::Arguments
+/// [`Args`]: crate::option::Args
 /// [`Token`]: crate::option::Token
 pub fn parse_tokens<T, F, E>(line: &str, f: F) -> Result<Option<T>, Error>
 where
-    F: FnOnce(&str, &mut Arguments) -> Result<T, E>,
+    F: FnOnce(&str, &mut Args) -> Result<T, E>,
     Error: From<E>,
 {
-    let mut args = Arguments::new(tokens(line));
+    let mut args = Args::new(tokens(line));
     if !args.has_next() {
         return Ok(None);
     }
 
-    let res = args.with_next(|k, args| {
+    let res = args.map_next(|k, args| {
         // COMPAT: consider a line with two empty keywords to be blank
         if !k.is_empty() {
-            Ok(Some(f(&k.to_ascii_lowercase(), args)?))
+            Ok(Some(f(&k, args)?))
         } else {
             // Skip one empty keyword, give up after two
-            args.with_next(|k, args| {
+            args.map_next(|k, args| {
                 if !k.is_empty() {
-                    Ok(Some(f(&k.to_ascii_lowercase(), args)?))
+                    Ok(Some(f(&k, args)?))
                 } else {
                     Ok(None)
                 }
@@ -178,6 +192,12 @@ pub enum DetailedError {
     InvalidPort(std::num::ParseIntError),
 }
 
+impl From<std::num::ParseIntError> for Error {
+    fn from(e: std::num::ParseIntError) -> Self {
+        DetailedError::InvalidPort(e).into()
+    }
+}
+
 impl std::error::Error for Error {}
 
 impl fmt::Display for Error {
@@ -219,7 +239,7 @@ impl From<DetailedError> for Error {
 /// `tokens` converts a string into an iterator of [`Token`s], intended for use with [`str::lines`].
 ///
 /// These token streams are not complete, choosing to omit end-of-line blank characters as these have
-/// no semantic importance to the format. For more details on the SSH option format, see [`Arguments`]
+/// no semantic importance to the format. For more details on the SSH option format, see [`Args`]
 /// and [`Token`].
 ///
 /// Note: In order to maintain compatibility with some of the more unusual parts of the config language,
@@ -228,7 +248,7 @@ impl From<DetailedError> for Error {
 /// [`Token`s]: crate::option::Token
 /// [`Token`]: crate::option::Token
 /// [`str::lines`]: https://doc.rust-lang.org/std/primitive.str.html#method.lines
-/// [`Arguments`]: crate::option::Arguments
+/// [`Args`]: crate::option::Args
 ///
 /// # Example
 ///
@@ -267,7 +287,6 @@ impl From<DetailedError> for Error {
 ///     vec![Token::Word("hello"), Token::Word("world")]
 /// );
 /// ```
-///
 pub fn tokens(line: &str) -> Tokens {
     let line = line
         .trim_start_matches(Tokens::BLANK)
@@ -319,21 +338,21 @@ pub enum Token<'a> {
     Invalid(&'a str),
 }
 
-/// Arguments provide access to the configuration statements in a line.
+/// Args provide access to the configuration statements in a line.
 ///
 /// As with many "found" languages, the SSH config language accepts some unexpected
 /// and surprising items: `Port 22` is an accepted way to spell the pair of arguments
 /// `("Port", "22")`, but so is `Po"rt"2"2"`:
 ///
 /// ```
-/// use ssh2_config::option::{Arguments, tokens};
+/// use ssh2_config::option::{Args, Arguments, tokens};
 ///
-/// Arguments::new(tokens(r#"Port 22"#)).with_next(|port, args| {
-///     args.with_one(|num| Ok(assert_eq!((port, num), ("Port", "22"))))
+/// Args::new(tokens(r#"Port 22"#)).map_next(|port, args| {
+///     args.map_next(|num, _| Ok(assert_eq!((port, num), ("Port", "22"))))
 /// });
 ///
-/// Arguments::new(tokens(r#"Po"rt"2"2""#)).with_next(|port, args| {
-///     args.with_one(|num| Ok(assert_eq!((port, num), ("Port", "22"))))
+/// Args::new(tokens(r#"Po"rt"2"2""#)).map_next(|port, args| {
+///     args.map_next(|num, _| Ok(assert_eq!((port, num), ("Port", "22"))))
 /// });
 /// ```
 ///
@@ -346,17 +365,16 @@ pub enum Token<'a> {
 ///
 /// Arguments internally preserves the invariant that the stream does not begin with a
 /// "Delim" token, instead greedily consuming one if it exists for the preceding argument.
-pub struct Arguments<'a>(itertools::PutBack<Tokens<'a>>);
+pub struct Args<'a>(itertools::PutBack<Tokens<'a>>);
 
-#[allow(missing_docs)] // TODO
-impl<'a> Arguments<'a> {
-    /// new constructs a new Arguments wrapper for a stream of `Token`s
+impl<'a> Args<'a> {
+    /// new constructs a new Args wrapper for a stream of `Token`s
     pub fn new(tokens: Tokens<'a>) -> Self {
-        Arguments(itertools::put_back(tokens))
+        Args(itertools::put_back(tokens))
     }
 
     /// has_next returns true if there is at least one more argument.
-    pub fn has_next(self: &mut Self) -> bool {
+    fn has_next(self: &mut Self) -> bool {
         if let Some(next) = self.0.next() {
             self.0.put_back(next);
             true
@@ -364,16 +382,22 @@ impl<'a> Arguments<'a> {
             false
         }
     }
+}
 
-    pub fn with_one<T, F>(self: &mut Self, f: F) -> Result<T, Error>
-    where
-        F: FnOnce(&str) -> Result<T, Error>,
-    {
-        self.with_next(|a, _| f(a))
+impl<'a> Iterator for Args<'a> {
+    type Item = Result<String, Error>;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        match self.map_owned(std::convert::identity) {
+            Err(Error::MissingArgument) => None,
+            res => Some(res),
+        }
     }
+}
 
+impl<'a> Arguments for Args<'a> {
     // comparable to strdelim
-    pub fn with_next<T, F>(self: &mut Self, f: F) -> Result<T, Error>
+    fn map_next<T, F>(self: &mut Self, f: F) -> Result<T, Error>
     where
         F: FnOnce(&str, &mut Self) -> Result<T, Error>,
     {
@@ -409,6 +433,29 @@ impl<'a> Arguments<'a> {
             Some(Delim) => f("", self),
             Some(Invalid(inv)) => Err(Error::UnmatchedQuote(inv.to_owned())),
         }
+    }
+}
+
+/// Arguments represents access to the configuration arguments in a line.
+///
+/// Implementations should return `Err(MissingArgument)` if `map_next` is called
+/// on an empty argument list.
+///
+/// See:
+/// - `SSHOption.try_from((&str, &mut Arguments))`
+/// - `Args`
+pub trait Arguments: IntoIterator<Item = Result<String, Error>> {
+    /// map_next provides access to the next argument and subsequent arguments
+    fn map_next<T, F>(self: &mut Self, f: F) -> Result<T, Error>
+    where
+        F: FnOnce(&str, &mut Self) -> Result<T, Error>;
+
+    /// map_one provides access to a owned copy of the next argument
+    fn map_owned<T, F>(self: &mut Self, f: F) -> Result<T, Error>
+    where
+        F: FnOnce(String) -> T,
+    {
+        self.map_next(|a, _| Ok(f(a.to_owned())))
     }
 }
 
@@ -524,7 +571,7 @@ impl<'a> Iterator for Tokens<'a> {
 mod test {
     use super::SSHOption;
     use super::Token::*;
-    use super::{parse_tokens, tokens, Error};
+    use super::{parse_tokens, tokens, Arguments, Error};
     use itertools::Itertools;
 
     #[test]
@@ -676,25 +723,25 @@ mod test {
         for spelling in &[
             r#"Hello World"#,
             r#"=Hello World"#,
-            r#"HeLlO World"#,
-            r#"HEllo       World"#,
-            r#"HEllo  "World""#,
-            r#""HEllo"  "World""#,
-            r#"H"Ello"  World"#,
-            r#"H"Ello"  "World""#,
-            r#"HEllo  Wo"rld""#,
-            r#""HEllo"  Wo"rld""#,
-            r#"HE"llo"  Wo"rld""#,
+            r#"Hello World"#,
+            r#"Hello       World"#,
+            r#"Hello  "World""#,
+            r#""Hello"  "World""#,
+            r#"H"ello"  World"#,
+            r#"H"ello"  "World""#,
+            r#"Hello  Wo"rld""#,
+            r#""Hello"  Wo"rld""#,
+            r#"He"llo"  Wo"rld""#,
             r#""Hello"World"#,
             r#""Hello""World""#,
             r#"H"ello""World""#,
             r#"H"ello"W"orld""#,
         ] {
             parse_tokens::<_, _, Error>(spelling, |k, args| {
-                args.with_one(|v| {
+                args.map_next(|v, _| {
                     Ok(assert_eq!(
                         (k, v),
-                        ("hello", "World"),
+                        ("Hello", "World"),
                         "failed for input: {:?}",
                         spelling
                     ))
@@ -705,7 +752,7 @@ mod test {
         }
 
         parse_tokens::<_, _, Error>("h\"el lo  \"       wo\" rld\"", |k, args| {
-            args.with_one(|v| Ok(assert_eq!((k, v), ("hel lo  ", "wo rld"))))
+            args.map_next(|v, _| Ok(assert_eq!((k, v), ("hel lo  ", "wo rld"))))
         })
         .expect("parse failed")
         .expect("nothing found");
@@ -760,12 +807,12 @@ mod test {
 
         macro_rules! assert_parse {
             ($s:expr, $opt:expr) => {
+                assert_eq!(SSHOption::from_str($s).expect("parse failed"), $opt);
                 assert_eq!(
-                    SSHOption::from_str($s)
-                        .expect(format!("parse failed on input {:?}", $s).as_str()),
-                    $opt,
-                    "for input: {:?}",
-                    $s
+                    super::simple::parse_opt($s)
+                        .expect("parse failed (simple)")
+                        .expect("nothing found"),
+                    $opt
                 );
             };
         }
@@ -784,7 +831,8 @@ mod test {
 ///
 /// ```ebnf
 /// config : line + ;
-/// line : key [ blank + arg | blank * quoted ] + 32 '\r' ? '\n' ;
+/// line : blank * [ comment | [ key [ blank + arg | blank * quoted ] + 32 ] ] blank * '\r' ? '\n' ;
+/// comment: '#' NON_EOL *
 /// key : ASCII_ALPHA + ;
 /// quoted : '"' NON_QUOTE * '"' ;
 /// blank : ' ' | '\t' | '=' ;
@@ -792,13 +840,82 @@ mod test {
 /// ```
 ///
 /// where:
+///  * NON_EOL is any character other than `\n`
 ///  * ASCII_ALPHA is any character in the English ASCII alphabet range: [a-zA-Z]
 ///  * NON_QUOTE is any character besides `"`
 ///  * NON_BLANK is any character besides `blank`
 pub mod simple {
-    pub use super::Error;
+    pub use super::{Arguments, Error, SSHOption};
     use core::str::CharIndices;
+    use std::convert::TryFrom;
     use std::iter::Peekable;
+
+    /// parse_opt reads a single option from a single line of config.
+    ///
+    /// The ssh_config format is entirely line-oriented (no option may span multiple lines), so it's best to use
+    /// this in coordination with [`str::lines`]. This function returns `Result<Option<_>, _>` as it is possible
+    /// to successfully parse no option from either a comment or a blank line.
+    ///
+    /// Note: This implementation technically accepts a subset of the configurations that ssh itself will
+    /// understand, but should work for almost all configs that are likely to be encountered. For more detail
+    /// on what this omits, see the [`simple` module] and [`super::Args`].
+    ///
+    /// [`simple` module]: crate::options::simple
+    /// [`super::Args`]: super::Args
+    /// [`str::lines`]: https://doc.rust-lang.org/std/primitive.str.html#method.lines
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use ssh2_config::option::simple::{parse_opt, SSHOption};
+    ///
+    /// let opts: Result<Vec<_>, _> = r#"# a comment
+    /// Hostname example.com
+    /// Port 22
+    /// "#
+    ///     .lines()
+    ///     .filter_map(|line| parse_opt(line).transpose())
+    ///     .collect();
+    ///
+    /// assert_eq!(
+    ///     opts.unwrap(),
+    ///     vec![SSHOption::Hostname(String::from("example.com")), SSHOption::Port(22)],
+    /// );
+    /// ```
+    pub fn parse_opt(line: &str) -> Result<Option<SSHOption>, Error> {
+        let mut args = Args(tokens(line));
+        let res = match args.0.next() {
+            None => Ok(None),
+            Some(keyword) => Some(TryFrom::try_from((keyword?, &mut args))).transpose(),
+        };
+
+        match args.0.next() {
+            None => res,
+            Some(more) => Err(Error::TrailingGarbage(more?.to_owned())),
+        }
+    }
+
+    struct Args<'a>(Tokens<'a>);
+
+    impl<'a> Iterator for Args<'a> {
+        type Item = Result<String, Error>;
+
+        fn next(self: &mut Self) -> Option<Self::Item> {
+            Some(self.0.next()?.map(str::to_owned))
+        }
+    }
+
+    impl<'a> Arguments for Args<'a> {
+        fn map_next<T, F>(self: &mut Self, f: F) -> Result<T, Error>
+        where
+            F: FnOnce(&str, &mut Self) -> Result<T, Error>,
+        {
+            match self.0.next() {
+                None => Err(Error::MissingArgument),
+                Some(arg) => f(arg?, self),
+            }
+        }
+    }
 
     /// An iterator of [`&str`]s created with the method [`tokens`].
     ///
@@ -941,6 +1058,10 @@ pub mod simple {
 
             case! ({
                 input: "",
+                expect: vec![],
+            });
+            case! ({
+                input: "# comment",
                 expect: vec![],
             });
             case! ({
