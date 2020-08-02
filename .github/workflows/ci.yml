@@ -16,6 +16,9 @@ jobs:
           - beta
           - nightly
           - msrv # Minimum Supported Rust Version, see below
+        features:
+          - ''
+          - with_libc
 
     steps:
       - uses: actions/checkout@v2
@@ -41,6 +44,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: test
+          args: --no-default-features --features '${{ matrix.features }}'
 
       - uses: actions-rs/cargo@v1
         with:
