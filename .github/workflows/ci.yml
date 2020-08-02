@@ -17,8 +17,8 @@ jobs:
           - nightly
           - msrv # Minimum Supported Rust Version, see below
         features:
+          - default
           - ''
-          - with_libc
 
     steps:
       - uses: actions/checkout@v2
