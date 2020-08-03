@@ -98,21 +98,25 @@ fn a2port(s: &str) -> Result<u16, std::num::ParseIntError> {
 
     match s.parse() {
         res @ Ok(_) => res,
-        num_err @ Err(_) => match CString::new(s) {
-            Ok(cstr) => unsafe {
-                let tcp = CString::new("tcp").expect("CString::new failed");
-                let servent = getservbyname(cstr.as_ptr(), tcp.as_ptr());
-                if servent.is_null() {
-                    num_err
-                } else {
-                    // network byte order is big-endian
-                    Ok(u16::from_be((*servent).s_port.try_into().expect(
-                        "`/etc/services` database entry for port out of range (<0 or >65,536)",
+        num_err @ Err(_) => {
+            match CString::new(s) {
+                Ok(cstr) => {
+                    let tcp = CString::new("tcp").expect("CString::new failed");
+                    let servent = unsafe { getservbyname(cstr.as_ptr(), tcp.as_ptr()) };
+
+                    if servent.is_null() {
+                        num_err
+                    } else {
+                        // SAFETY: servent is not null
+                        // network byte order is big-endian
+                        Ok(u16::from_be(unsafe { (*servent).s_port }.try_into().expect(
+                        "`/etc/services` database entry for port out of range (<0 or >65,535)",
                     )))
+                    }
                 }
-            },
-            Err(_) => num_err,
-        },
+                Err(_) => num_err,
+            }
+        }
     }
 }
 
