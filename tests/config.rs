@@ -7,6 +7,14 @@ use tempfile::tempdir;
 
 #[test]
 fn hello_world() {
+    assert!(Command::new("ssh")
+        .args(&["-V"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .status()
+        .expect("failed to execute process")
+        .success());
+
     let output = Command::new("ssh")
         .args(&["-T", "-F", "/dev/null", "-G", "example.com"])
         .output()
