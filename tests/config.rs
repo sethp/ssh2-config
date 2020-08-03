@@ -176,7 +176,7 @@ fn leading_zero_width() {
 
 #[test]
 // TODO: Github CI doesn't populate /etc/services
-#[cfg(target_os = "macos")]
+// #[cfg(target_os = "macos")]
 fn hello_world5() {
     let dir = tempdir().unwrap();
     let cfg_file = dir.path().join("hello_world5_config");
