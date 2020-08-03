@@ -175,17 +175,38 @@ fn leading_zero_width() {
 }
 
 #[test]
-// TODO: Github CI doesn't populate /etc/services
-// #[cfg(target_os = "macos")]
 fn hello_world5() {
     let dir = tempdir().unwrap();
     let cfg_file = dir.path().join("hello_world5_config");
     fs::write(
         &cfg_file,
         r#"=# comment
-port ssh"#,
+port 22"#,
     )
     .expect("failed writing config");
+
+    let mut child = Command::new("ssh")
+        .args(&["-T", "-F", cfg_file.to_str().unwrap(), "-G", "example.com"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("failed to execute process");
+
+    child.wait().expect("child wasn't running");
+
+    let mut lines = io::BufReader::new(child.stdout.expect("no stdout")).lines();
+
+    assert_eq!(lines.nth(1).unwrap().unwrap(), "hostname example.com");
+    assert_eq!(lines.next().unwrap().unwrap(), "port 22");
+}
+
+#[test]
+// see: https://github.com/sethp/ssh2-config/issues/16
+#[cfg(not(CI))]
+fn test_named_ports() {
+    let dir = tempdir().unwrap();
+    let cfg_file = dir.path().join("named_ports_config");
+    fs::write(&cfg_file, r#"port ssh"#).expect("failed writing config");
 
     let mut child = Command::new("ssh")
         .args(&["-T", "-F", cfg_file.to_str().unwrap(), "-G", "example.com"])
