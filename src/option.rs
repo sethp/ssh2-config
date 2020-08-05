@@ -76,10 +76,46 @@ where
 
         match keyword.to_ascii_lowercase().as_str() {
             "user" => args.map_owned(User),
-            "port" => args.map_next(|arg, _| Ok(Port(arg.parse()?))),
+            "port" => args.map_next(|arg, _| Ok(Port(a2port(arg)?))),
             "hostname" => args.map_owned(Hostname),
 
             _ => Err(Error::from(DetailedError::BadOption(keyword.to_string()))),
+        }
+    }
+}
+
+#[cfg(not(feature = "with_libc"))]
+fn a2port(s: &str) -> Result<u16, std::num::ParseIntError> {
+    s.parse()
+}
+
+// See: https://github.com/openssh/openssh-portable/blob/e073106f370cdd2679e41f6f55a37b491f0e82fe/misc.c#L414-L432
+#[cfg(feature = "with_libc")]
+fn a2port(s: &str) -> Result<u16, std::num::ParseIntError> {
+    use libc::getservbyname;
+    use std::convert::TryInto;
+    use std::ffi::CString;
+
+    match s.parse() {
+        res @ Ok(_) => res,
+        num_err @ Err(_) => {
+            match CString::new(s) {
+                Ok(cstr) => {
+                    let tcp = CString::new("tcp").expect("CString::new failed");
+                    let servent = unsafe { getservbyname(cstr.as_ptr(), tcp.as_ptr()) };
+
+                    if servent.is_null() {
+                        num_err
+                    } else {
+                        // SAFETY: servent is not null
+                        // network byte order is big-endian
+                        Ok(u16::from_be(unsafe { (*servent).s_port }.try_into().expect(
+                        "`/etc/services` database entry for port out of range (<0 or >65,535)",
+                    )))
+                    }
+                }
+                Err(_) => num_err,
+            }
         }
     }
 }
@@ -188,7 +224,6 @@ pub enum DetailedError {
     BadOption(String),
 
     /// InvalidPort occurs when we encounter a port that can't be recognize, e.g. `Port -1`
-    // TODO: getservfromname
     InvalidPort(std::num::ParseIntError),
 }
 
@@ -819,8 +854,9 @@ mod test {
 
         assert_parse!(r#"User dusty"#, SSHOption::User(String::from("dusty")));
         assert_parse!(r#"Port 22"#, SSHOption::Port(22));
-        // TODO: getservbyname
-        // assert_parse!(r#"Port ssh"#, SSHOption::Port(22));
+        if cfg!(feature = "with_libc") {
+            assert_parse!(r#"Port ssh"#, SSHOption::Port(22));
+        }
     }
 }
 
