@@ -20,6 +20,9 @@
 #[macro_use]
 extern crate assert_matches;
 
+#[cfg(feature = "with_libc")]
+extern crate libc;
+
 /// Individual SSH config options, e.g. `Port 22` or `Hostname example.com`
 pub mod option;
 
