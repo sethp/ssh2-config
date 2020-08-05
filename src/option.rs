@@ -21,6 +21,7 @@ pub enum SSHOption {
     Hostname(Hostname),
     Host(Host),
     SendEnv(SendEnv),
+    Include(Include),
 }
 
 pub type User = String;
@@ -34,6 +35,12 @@ pub type SendEnv = Vec<Env>;
 pub enum Env {
     Send(String),
     Rm(String),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Include {
+    Paths(Vec<String>),
+    Opts(Vec<SSHOption>),
 }
 
 /// parse_opt reads a single option from a single line of config.
@@ -112,6 +119,10 @@ where
                 })
                 .collect::<Result<_, _>>()?,
             )),
+            // TODO: filter empty
+            "include" => Ok(Include(self::Include::Paths(
+                args.collect::<Result<_, _>>()?,
+            ))),
 
             _ => Err(Error::from(DetailedError::BadOption(keyword.to_string()))),
         }
@@ -638,9 +649,7 @@ impl<'a> Iterator for Tokens<'a> {
 
 #[cfg(test)]
 mod test {
-    use super::SSHOption;
-    use super::Token::*;
-    use super::{parse_tokens, tokens, Args, Arguments, Env, Error};
+    use super::{parse_tokens, tokens, Args, Arguments, Env, Error, Include, SSHOption, Token::*};
     use itertools::Itertools;
 
     #[test]
@@ -903,6 +912,10 @@ mod test {
                 Env::Send(String::from("LC_*")),
                 Env::Rm(String::from("SUPER_SECRET")),
             ])
+        );
+        assert_parse!(
+            r"Include site.d/*",
+            SSHOption::Include(Include::Paths(vec![String::from("site.d/*")]))
         );
     }
 
