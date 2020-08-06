@@ -16,30 +16,35 @@ use std::str::MatchIndices;
 #[allow(missing_docs)]
 #[non_exhaustive]
 pub enum SSHOption {
-    User(User),
-    Port(Port),
-    Hostname(Hostname),
-    Host(Host),
-    SendEnv(SendEnv),
+    User(String),
+    Port(u16),
+    Hostname(String),
+
+    Host(String),
+    SendEnv(Vec<Env>),
     Include(Include),
 }
 
-pub type User = String;
-pub type Port = u16;
-pub type Hostname = String;
-pub type Host = String;
-
-pub type SendEnv = Vec<Env>;
-
+/// Env represents an environment variable pattern for the `SendEnv` directive.
+///
+/// SendEnv may either express a positive or negative pattern to send along or
+/// stop the sending of a variable respectively.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Env {
+    /// Send is a positive pattern: "send along matching env vars"
     Send(String),
-    Rm(String),
+    /// Stop is a negative pattern: "do not send matching env vars from a previous directive"
+    Stop(String),
 }
 
+/// Include represents the nested config structure provided by an include directive.
+///
+/// We preserve the nested structure in order to handle nested Host/Match states.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Include {
+    /// Paths is a list of file patterns to include.
     Paths(Vec<String>),
+    /// Opts is a concatenated list of parsed options from an included file.
     Opts(Vec<SSHOption>),
 }
 
@@ -111,7 +116,7 @@ where
                 args.map(|maybe_arg| {
                     maybe_arg.map(|arg| {
                         if arg.starts_with("-") {
-                            Env::Rm(arg[1..].to_string())
+                            Env::Stop(arg[1..].to_string())
                         } else {
                             Env::Send(arg)
                         }
@@ -129,14 +134,30 @@ where
     }
 }
 
+/// a2port converts an "array" of characters into a port number
+///
+/// It does so by first attempting to parse the given characters as an 16-bit integer.
+/// On failure, and on systems with libc enabled, it will then check the string against the
+/// `/etc/services` database to see if the argument refers to a well-known named port.
+///
+/// See also: [misc.c] and [getservbyname].
+///
+/// [misc.c]: https://github.com/openssh/openssh-portable/blob/e073106f370cdd2679e41f6f55a37b491f0e82fe/misc.c#L414-L432
+/// [getservbyname]: https://man7.org/linux/man-pages/man3/getservbyname.3p.html
+pub fn a2port<S>(s: S) -> Result<u16, std::num::ParseIntError>
+where
+    S: AsRef<str>,
+{
+    _a2port(s.as_ref())
+}
+
 #[cfg(not(feature = "with_libc"))]
-fn a2port(s: &str) -> Result<u16, std::num::ParseIntError> {
+fn _a2port(s: &str) -> Result<u16, std::num::ParseIntError> {
     s.parse()
 }
 
-// See: https://github.com/openssh/openssh-portable/blob/e073106f370cdd2679e41f6f55a37b491f0e82fe/misc.c#L414-L432
 #[cfg(feature = "with_libc")]
-fn a2port(s: &str) -> Result<u16, std::num::ParseIntError> {
+fn _a2port(s: &str) -> Result<u16, std::num::ParseIntError> {
     use libc::getservbyname;
     use std::convert::TryInto;
     use std::ffi::CString;
@@ -910,7 +931,7 @@ mod test {
             SSHOption::SendEnv(vec![
                 Env::Send(String::from("LANG")),
                 Env::Send(String::from("LC_*")),
-                Env::Rm(String::from("SUPER_SECRET")),
+                Env::Stop(String::from("SUPER_SECRET")),
             ])
         );
         assert_parse!(

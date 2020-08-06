@@ -46,7 +46,10 @@ pub struct SSHConfig(pub Vec<option::SSHOption>);
 impl std::default::Default for SSHConfig {
     fn default() -> Self {
         use SSHOption::*;
-        SSHConfig(vec![Port(22)])
+        SSHConfig(vec![
+            Host("*".to_owned()),
+            Port(option::a2port("ssh").unwrap_or(22)),
+        ])
     }
 }
 
@@ -166,6 +169,8 @@ impl SSHConfig {
             config.extend(readconf_depth(path, 0)?);
         }
 
+        config.extend(SSHConfig::default().0.into_iter().filter(|_| true));
+
         Ok(SSHConfig(config))
     }
 
@@ -218,8 +223,8 @@ mod test {
     fn it_works() {
         let cfg = SSHConfig::from_default_files().expect("read failed");
         assert_eq!(
-            cfg.0,
-            vec![
+            cfg.0[..6],
+            [
                 SSHOption::Host(String::from("github.com")),
                 SSHOption::User(String::from("git")),
                 SSHOption::Host(String::from("bitbucket.org")),
@@ -253,17 +258,20 @@ mod test {
         assert_eq!(
             SSHConfig::from_file(dir.path().join("file_1"))
                 .expect("failed to read config")
-                .0,
-            vec![SSHOption::Include(option::Include::Opts(vec![
-                SSHOption::Host(String::from("example.com")),
-            ]))],
+                .0
+                .first()
+                .expect("should have at least one element"),
+            &SSHOption::Include(option::Include::Opts(vec![SSHOption::Host(String::from(
+                "example.com",
+            ))])),
         );
 
         let mut deep_cfg =
             SSHConfig::from_file(dir.path().join(format!("file_{}", MAX_READCONF_DEPTH)))
                 .expect("failed to read config")
                 .0
-                .pop()
+                .into_iter()
+                .next()
                 .unwrap();
         for d in 1..MAX_READCONF_DEPTH {
             deep_cfg = match deep_cfg {
