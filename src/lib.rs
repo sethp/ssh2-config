@@ -29,7 +29,7 @@ pub mod option;
 pub use option::SSHOption;
 
 use std::fmt;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 
@@ -59,6 +59,7 @@ pub enum Error {
     Read(io::Error),
     Parse(option::Error),
     MaxDepthExceeded,
+    PermissionError,
 }
 
 impl std::error::Error for Error {
@@ -81,6 +82,9 @@ impl fmt::Display for Error {
                 "exceeded maximum depth while processing include, max: {}",
                 MAX_READCONF_DEPTH
             ),
+            Error::PermissionError => {
+                write!(f, "Bad owner or permissions (writable by group or world)")
+            }
         }
     }
 }
@@ -139,10 +143,33 @@ impl SSHConfig {
         // oCanonicalizePermittedCNAMEs?
         // oGlobalKnownHostsFile, oUserKnownHostsFile
 
+        struct ReadOpts {}
+        impl Default for ReadOpts {
+            fn default() -> Self {
+                Self {}
+            }
+        }
+
         fn readconf_depth<P: AsRef<Path>>(path: P, depth: usize) -> Result<Vec<SSHOption>, Error> {
             if depth > MAX_READCONF_DEPTH {
                 return Err(Error::MaxDepthExceeded);
             }
+
+            // The only depth 0 file that gets checked for perms is the user config file
+            if depth != 0 {
+                let meta = fs::metadata(&path)?;
+                let perms = meta.permissions();
+
+                if cfg!(unix) {
+                    use std::os::unix::fs::MetadataExt;
+                    use std::os::unix::fs::PermissionsExt;
+                    // TODO: check against getuid
+                    if meta.uid() != 0 && perms.mode() & 0o022 != 0 {
+                        return Err(Error::PermissionError);
+                    }
+                }
+            }
+
             use option::Include::*;
             use option::SSHOption::Include;
             let file = File::open(path)?;
@@ -150,12 +177,29 @@ impl SSHConfig {
                 .lines()
                 .filter_map(|line| match line.and_then2::<Error>(option::parse_opt) {
                     Ok(None) => None,
-                    Ok(Some(Include(Paths(p)))) => {
-                        // TODO: more than 1 or == 0?
-                        Some(
-                            readconf_depth(p.first().unwrap(), depth + 1)
-                                .map(|opts| Include(Opts(opts))),
+                    Ok(Some(Include(Paths(paths)))) => {
+                        match lifted_flatten(
+                            paths
+                                .into_iter()
+                                .filter_map(
+                                    |p| /* TODO: tilde expansion, sometimes */ glob::glob(&p).ok(),
+                                )
+                                .flatten()
+                                .filter_map(|g| {
+                                    // TODO "anchoring"
+                                    g.ok().and_then(|f| match readconf_depth(f, depth + 1) {
+                                        Err(Error::Read(_)) => None,
+
+                                        val @ Ok(_) => Some(val),
+                                        err @ Err(_) => Some(err),
+                                    })
+                                }),
                         )
+                        .collect::<Result<Vec<_>, _>>()
+                        {
+                            Ok(opts) => Some(Ok(Include(Opts(opts)))),
+                            Err(err) => Some(Err(err)),
+                        }
                     }
                     Ok(Some(opt)) => Some(Ok(opt)),
                     Err(err) => Some(Err(err)),
@@ -208,6 +252,66 @@ where
             Ok(t) => op(t).map_err(From::from),
             Err(e) => Err(From::from(e)),
         }
+    }
+}
+
+// Iterator of PathBuf + mapping from PathBuf to Result<Vec<SSHOption>, Error>
+// Desired: Iterator of Result<SSHOption, Error>
+// More general case: Iterator of Result<IntoIterator<Item = Result<T, F>>, G>
+//    -> Iterator<Item = Result<T, E: From<F> + From<G>>
+#[allow(unused)]
+fn lifted_flatten<I>(iter: I) -> impl Iterator<Item = Result<option::SSHOption, Error>>
+where
+    I: IntoIterator<Item = Result<Vec<SSHOption>, Error>>,
+{
+    use std::iter::{Fuse, Map};
+    type OptResult = Result<option::SSHOption, option::Error>;
+
+    struct Ex<I, U>
+    where
+        I: Iterator,
+    {
+        iter: Fuse<I>,
+        top: Option<U>,
+    }
+
+    impl<I, U, V> Iterator for Ex<I, U>
+    where
+        I: Iterator<Item = Result<V, Error>>,
+        U: Iterator<Item = SSHOption>,
+        V: IntoIterator<IntoIter = U, Item = U::Item>,
+    {
+        type Item = Result<option::SSHOption, Error>;
+
+        fn next(&mut self) -> Option<Result<option::SSHOption, Error>> {
+            loop {
+                if let Some(ref mut inner) = self.top {
+                    match inner.next() {
+                        None => self.top = None,
+                        Some(e) => return Some(Ok(e)),
+                    }
+                }
+                self.top = Some(
+                    match self.iter.next()? {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(From::from(e))),
+                    }
+                    .into_iter(),
+                )
+            }
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let (lo, hi) = self.top.as_ref().map_or((0, Some(0)), U::size_hint);
+            match self.iter.size_hint() {
+                (0, Some(0)) => (lo, hi),
+                _ => (lo, None),
+            }
+        }
+    };
+    Ex {
+        iter: iter.into_iter().fuse(),
+        top: None,
     }
 }
 
