@@ -178,27 +178,26 @@ impl SSHConfig {
                 .filter_map(|line| match line.and_then2::<Error>(option::parse_opt) {
                     Ok(None) => None,
                     Ok(Some(Include(Paths(paths)))) => {
-                        match lifted_flatten(
-                            paths
-                                .into_iter()
-                                .filter_map(
-                                    |p| /* TODO: tilde expansion, sometimes */ glob::glob(&p).ok(),
-                                )
-                                .flatten()
-                                .filter_map(|g| {
-                                    // TODO "anchoring"
-                                    g.ok().and_then(|f| match readconf_depth(f, depth + 1) {
-                                        Err(Error::Read(_)) => None,
+                        match paths
+                            .into_iter()
+                            .filter_map(
+                                |p| /* TODO: tilde expansion, sometimes */ glob::glob(&p).ok(),
+                            )
+                            .flatten()
+                            .filter_map(|g| {
+                                // TODO "anchoring"
+                                g.ok().and_then(|f| match readconf_depth(f, depth + 1) {
+                                    Err(Error::Read(_)) => None,
 
-                                        val @ Ok(_) => Some(val),
-                                        err @ Err(_) => Some(err),
-                                    })
-                                }),
-                        )
-                        .collect::<Result<Vec<_>, _>>()
+                                    val @ Ok(_) => Some(val),
+                                    err @ Err(_) => Some(err),
+                                })
+                            })
+                            .flatten2()
+                            .collect::<Result<Vec<_>, _>>()
                         {
                             Ok(opts) => Some(Ok(Include(Opts(opts)))),
-                            Err(err) => Some(Err(err)),
+                            Err(err) => Some(Err(From::from(err))),
                         }
                     }
                     Ok(Some(opt)) => Some(Ok(opt)),
@@ -255,63 +254,71 @@ where
     }
 }
 
-// Iterator of PathBuf + mapping from PathBuf to Result<Vec<SSHOption>, Error>
-// Desired: Iterator of Result<SSHOption, Error>
-// More general case: Iterator of Result<IntoIterator<Item = Result<T, F>>, G>
-//    -> Iterator<Item = Result<T, E: From<F> + From<G>>
-#[allow(unused)]
-fn lifted_flatten<I>(iter: I) -> impl Iterator<Item = Result<option::SSHOption, Error>>
-where
-    I: IntoIterator<Item = Result<Vec<SSHOption>, Error>>,
-{
-    use std::iter::{Fuse, Map};
-    type OptResult = Result<option::SSHOption, option::Error>;
+use std::iter::Fuse;
 
-    struct Ex<I, U>
-    where
-        I: Iterator,
-    {
-        iter: Fuse<I>,
-        top: Option<U>,
+struct Flatten2<I, U>
+where
+    I: Iterator,
+{
+    iter: Fuse<I>,
+    top: Option<U>,
+}
+
+trait LiftedFlatten<T, U, V, E>
+where
+    Self: Sized + Iterator,
+    U: Iterator<Item = T>,
+    V: IntoIterator<IntoIter = U, Item = U::Item>,
+{
+    fn flatten2(self) -> Flatten2<Self, U>;
+}
+
+impl<I, T, U, V, E> LiftedFlatten<T, U, V, E> for I
+where
+    I: Iterator<Item = Result<V, E>>,
+    U: Iterator<Item = T>,
+    V: IntoIterator<IntoIter = U, Item = U::Item>,
+{
+    fn flatten2(self) -> Flatten2<Self, U> {
+        Flatten2 {
+            iter: self.fuse(),
+            top: None,
+        }
+    }
+}
+
+impl<I, T, U, V, E> Iterator for Flatten2<I, U>
+where
+    I: Iterator<Item = Result<V, E>>,
+    U: Iterator<Item = T>,
+    V: IntoIterator<IntoIter = U, Item = U::Item>,
+{
+    type Item = Result<T, E>;
+
+    fn next(&mut self) -> Option<Result<T, E>> {
+        loop {
+            if let Some(ref mut inner) = self.top {
+                match inner.next() {
+                    None => self.top = None,
+                    Some(e) => return Some(Ok(e)),
+                }
+            }
+            self.top = Some(
+                match self.iter.next()? {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(From::from(e))),
+                }
+                .into_iter(),
+            )
+        }
     }
 
-    impl<I, U, V> Iterator for Ex<I, U>
-    where
-        I: Iterator<Item = Result<V, Error>>,
-        U: Iterator<Item = SSHOption>,
-        V: IntoIterator<IntoIter = U, Item = U::Item>,
-    {
-        type Item = Result<option::SSHOption, Error>;
-
-        fn next(&mut self) -> Option<Result<option::SSHOption, Error>> {
-            loop {
-                if let Some(ref mut inner) = self.top {
-                    match inner.next() {
-                        None => self.top = None,
-                        Some(e) => return Some(Ok(e)),
-                    }
-                }
-                self.top = Some(
-                    match self.iter.next()? {
-                        Ok(v) => v,
-                        Err(e) => return Some(Err(From::from(e))),
-                    }
-                    .into_iter(),
-                )
-            }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let (lo, hi) = self.top.as_ref().map_or((0, Some(0)), U::size_hint);
+        match self.iter.size_hint() {
+            (0, Some(0)) => (lo, hi),
+            _ => (lo, None),
         }
-
-        fn size_hint(&self) -> (usize, Option<usize>) {
-            let (lo, hi) = self.top.as_ref().map_or((0, Some(0)), U::size_hint);
-            match self.iter.size_hint() {
-                (0, Some(0)) => (lo, hi),
-                _ => (lo, None),
-            }
-        }
-    };
-    Ex {
-        iter: iter.into_iter().fuse(),
-        top: None,
     }
 }
 
