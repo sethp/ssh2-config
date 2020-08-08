@@ -173,37 +173,42 @@ impl SSHConfig {
             use option::Include::*;
             use option::SSHOption::Include;
             let file = File::open(path)?;
-            io::BufReader::new(file)
-                .lines()
-                .filter_map(|line| match line.and_then2::<Error>(option::parse_opt) {
-                    Ok(None) => None,
-                    Ok(Some(Include(Paths(paths)))) => {
-                        match paths
+            let mut opts = vec![];
+            for line in io::BufReader::new(file).lines() {
+                let opt = if let Some(opt) = option::parse_opt(line?)? {
+                    opt
+                } else {
+                    continue;
+                };
+
+                match opt {
+                    Include(Paths(paths)) => {
+                        let mut vec = vec![];
+
+                        let files = paths
                             .into_iter()
                             .filter_map(
-                                |p| /* TODO: tilde expansion, sometimes */ glob::glob(&p).ok(),
+                                |p|/* TODO: tilde expansion, sometimes */ glob::glob(&p).ok(),
                             )
                             .flatten()
-                            .filter_map(|g| {
-                                // TODO "anchoring"
-                                g.ok().and_then(|f| match readconf_depth(f, depth + 1) {
-                                    Err(Error::Read(_)) => None,
+                            .filter_map(|p| p.ok());
 
-                                    val @ Ok(_) => Some(val),
-                                    err @ Err(_) => Some(err),
-                                })
-                            })
-                            .flatten2()
-                            .collect::<Result<Vec<_>, _>>()
-                        {
-                            Ok(opts) => Some(Ok(Include(Opts(opts)))),
-                            Err(err) => Some(Err(From::from(err))),
+                        for f in files {
+                            // TODO "anchoring"
+                            match readconf_depth(f, depth + 1) {
+                                Err(Error::Read(_)) => continue,
+                                err @ Err(_) => return err,
+
+                                Ok(o) => vec.extend(o),
+                            }
                         }
+                        opts.push(Include(Opts(vec)))
                     }
-                    Ok(Some(opt)) => Some(Ok(opt)),
-                    Err(err) => Some(Err(err)),
-                })
-                .collect::<Result<Vec<_>, _>>()
+
+                    opt => opts.push(opt),
+                }
+            }
+            Ok(opts)
         }
 
         let mut config = vec![];
@@ -227,98 +232,6 @@ impl SSHConfig {
 
     pub fn connect_with_auth(self: &Self) -> ssh2::Session {
         unimplemented!()
-    }
-}
-
-trait ErrLattice<T, U, F, E1, E2>
-where
-    F: FnOnce(T) -> Result<U, E2>,
-{
-    fn and_then2<E>(self, op: F) -> Result<U, E>
-    where
-        E: From<E1> + From<E2>;
-}
-
-impl<T, U, F, E1, E2> ErrLattice<T, U, F, E1, E2> for Result<T, E1>
-where
-    F: FnOnce(T) -> Result<U, E2>,
-{
-    fn and_then2<E>(self, op: F) -> Result<U, E>
-    where
-        E: From<E1> + From<E2>,
-    {
-        match self {
-            Ok(t) => op(t).map_err(From::from),
-            Err(e) => Err(From::from(e)),
-        }
-    }
-}
-
-use std::iter::Fuse;
-
-struct Flatten2<I, U>
-where
-    I: Iterator,
-{
-    iter: Fuse<I>,
-    top: Option<U>,
-}
-
-trait LiftedFlatten<T, U, V, E>
-where
-    Self: Sized + Iterator,
-    U: Iterator<Item = T>,
-    V: IntoIterator<IntoIter = U, Item = U::Item>,
-{
-    fn flatten2(self) -> Flatten2<Self, U>;
-}
-
-impl<I, T, U, V, E> LiftedFlatten<T, U, V, E> for I
-where
-    I: Iterator<Item = Result<V, E>>,
-    U: Iterator<Item = T>,
-    V: IntoIterator<IntoIter = U, Item = U::Item>,
-{
-    fn flatten2(self) -> Flatten2<Self, U> {
-        Flatten2 {
-            iter: self.fuse(),
-            top: None,
-        }
-    }
-}
-
-impl<I, T, U, V, E> Iterator for Flatten2<I, U>
-where
-    I: Iterator<Item = Result<V, E>>,
-    U: Iterator<Item = T>,
-    V: IntoIterator<IntoIter = U, Item = U::Item>,
-{
-    type Item = Result<T, E>;
-
-    fn next(&mut self) -> Option<Result<T, E>> {
-        loop {
-            if let Some(ref mut inner) = self.top {
-                match inner.next() {
-                    None => self.top = None,
-                    Some(e) => return Some(Ok(e)),
-                }
-            }
-            self.top = Some(
-                match self.iter.next()? {
-                    Ok(v) => v,
-                    Err(e) => return Some(Err(From::from(e))),
-                }
-                .into_iter(),
-            )
-        }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let (lo, hi) = self.top.as_ref().map_or((0, Some(0)), U::size_hint);
-        match self.iter.size_hint() {
-            (0, Some(0)) => (lo, hi),
-            _ => (lo, None),
-        }
     }
 }
 
