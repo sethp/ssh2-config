@@ -23,11 +23,31 @@ extern crate assert_matches;
 #[cfg(feature = "with_libc")]
 extern crate libc;
 
+#[cfg(feature = "with_libc")]
+use {libc::getuid, tilde_expand::tilde_expand};
+
+#[cfg(not(feature = "with_libc"))]
+fn getuid() -> u16 {
+    unimplemented!()
+}
+
+#[cfg(not(feature = "with_libc"))]
+fn tilde_expand(s: &[u8]) -> Vec<u8> {
+    if s.starts_with("~/") {
+        let mut r = Vec::new(homedir().into_bytes());
+        r.extend(s[2..]);
+        r
+    } else {
+        Vec::new(s)
+    }
+}
+
 /// Individual SSH config options, e.g. `Port 22` or `Hostname example.com`
 pub mod option;
 
 pub use option::SSHOption;
 
+use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, BufRead};
@@ -60,6 +80,7 @@ pub enum Error {
     Parse(option::Error),
     MaxDepthExceeded,
     PermissionError,
+    BadInclude(String),
 }
 
 impl std::error::Error for Error {
@@ -85,6 +106,7 @@ impl fmt::Display for Error {
             Error::PermissionError => {
                 write!(f, "Bad owner or permissions (writable by group or world)")
             }
+            Error::BadInclude(ref path) => write!(f, "bad include path: {}", path),
         }
     }
 }
@@ -107,21 +129,51 @@ impl From<option::Error> for Error {
     }
 }
 
+#[cfg(all(unix, feature = "with_libc"))]
+fn homedir() -> OsString {
+    use std::ffi::{CStr, OsStr};
+    use std::os::unix::ffi::OsStrExt;
+    let (pw, uid) = unsafe {
+        // SAFETY: getuid can't fail
+        let uid = libc::getuid();
+        (libc::getpwuid(uid), uid)
+    };
+    if pw.is_null() {
+        panic!("No user exists for uid {}", uid)
+    }
+    // SAFETY: pw is not null
+    let dir = unsafe { CStr::from_ptr((*pw).pw_dir) };
+    // SAFETY: we copy the bytes with `to_os_string` before returning
+    // This is important because `getpwuid` returns the address of a
+    // static region that would be overwritten by future `getpw*` calls
+    OsStr::from_bytes(dir.to_bytes()).to_os_string()
+}
+
+#[cfg(not(feature = "with_libc"))]
+fn homedir() -> OsString {
+    std::env::var_os("HOME").expect("HOME environment variable must be set")
+}
+
 #[allow(missing_docs)]
 impl SSHConfig {
     pub fn from_default_files() -> Result<Self, Error> {
-        // TODO: https://github.com/openssh/openssh-portable/blob/25e3bccbaa63d27b9d5e09c123f1eb28594d2bd6/ssh.c#L545
-        // getpwuid
-        Self::from_files(&[
-            [&std::env::var("HOME").unwrap(), ".ssh", "config"]
-                .iter()
-                .collect::<PathBuf>()
-                .as_path(),
-            ["/etc", "ssh", "ssh_config"]
-                .iter()
-                .collect::<PathBuf>()
-                .as_path(),
-        ])
+        Self::from_files(&[&Self::user_config(), &Self::system_config()])
+    }
+
+    fn user_dir() -> PathBuf {
+        [homedir(), OsString::from(".ssh")].iter().collect()
+    }
+
+    pub fn user_config() -> PathBuf {
+        Self::user_dir().join("config")
+    }
+
+    fn system_dir() -> PathBuf {
+        ["/etc", "ssh"].iter().collect()
+    }
+
+    pub fn system_config() -> PathBuf {
+        Self::system_dir().join("ssh_config")
     }
 
     pub fn from_file<P>(path: P) -> Result<Self, Error>
@@ -143,28 +195,39 @@ impl SSHConfig {
         // oCanonicalizePermittedCNAMEs?
         // oGlobalKnownHostsFile, oUserKnownHostsFile
 
-        struct ReadOpts {}
-        impl Default for ReadOpts {
-            fn default() -> Self {
-                Self {}
-            }
+        #[allow(unused)]
+        #[derive(Copy, Clone)]
+        // Similar to SSH's `flags` parameter
+        struct ReadMeta {
+            depth: usize,
+            user_config: bool,
         }
 
-        fn readconf_depth<P: AsRef<Path>>(path: P, depth: usize) -> Result<Vec<SSHOption>, Error> {
-            if depth > MAX_READCONF_DEPTH {
+        fn readconf_depth<P: AsRef<Path>>(
+            path: P,
+            meta: ReadMeta,
+        ) -> Result<Vec<SSHOption>, Error> {
+            if meta.depth > MAX_READCONF_DEPTH {
                 return Err(Error::MaxDepthExceeded);
             }
 
             // The only depth 0 file that gets checked for perms is the user config file
-            if depth != 0 {
+            if meta.depth > 0 || path.as_ref() == &SSHConfig::user_config() {
                 let meta = fs::metadata(&path)?;
                 let perms = meta.permissions();
 
                 if cfg!(unix) {
                     use std::os::unix::fs::MetadataExt;
                     use std::os::unix::fs::PermissionsExt;
-                    // TODO: check against getuid
-                    if meta.uid() != 0 && perms.mode() & 0o022 != 0 {
+                    if (meta.uid() != 0
+                        && if cfg!(feature = "with_libc") {
+                            // SAFETY: getuid can never fail
+                            meta.uid() != unsafe { getuid() }
+                        } else {
+                            false
+                        })
+                        || perms.mode() & 0o022 != 0
+                    {
                         return Err(Error::PermissionError);
                     }
                 }
@@ -183,19 +246,49 @@ impl SSHConfig {
 
                 match opt {
                     Include(Paths(paths)) => {
+                        let mut globbed = vec![];
+                        for path in paths {
+                            /*
+                             * Ensure all paths are anchored. User configuration
+                             * files may begin with '~/' but system configurations
+                             * must not. If the path is relative, then treat it
+                             * as living in ~/.ssh for user configurations or
+                             * /etc/ssh for system ones.
+                             */
+                            let p = match path {
+                                p if p.starts_with("~") && !meta.user_config => {
+                                    return Err(Error::BadInclude(p));
+                                }
+                                p if p.starts_with("~") => {
+                                    String::from_utf8(tilde_expand(p.as_bytes())).unwrap_or(p)
+                                }
+                                // TODO: other platforms?
+                                p if !p.starts_with("/") => format!(
+                                    "{}/{}",
+                                    if meta.user_config {
+                                        SSHConfig::user_dir()
+                                    } else {
+                                        SSHConfig::system_dir()
+                                    }
+                                    .display(),
+                                    p
+                                ),
+                                p => p,
+                            };
+
+                            globbed.push(if let Ok(g) = glob::glob(&p) {
+                                g
+                            } else {
+                                continue;
+                            });
+                        }
+
+                        let files = globbed.into_iter().flatten().filter_map(|p| p.ok());
                         let mut vec = vec![];
-
-                        let files = paths
-                            .into_iter()
-                            .filter_map(
-                                |p|/* TODO: tilde expansion, sometimes */ glob::glob(&p).ok(),
-                            )
-                            .flatten()
-                            .filter_map(|p| p.ok());
-
+                        let mut m = meta;
+                        m.depth += 1;
                         for f in files {
-                            // TODO "anchoring"
-                            match readconf_depth(f, depth + 1) {
+                            match readconf_depth(f, m) {
                                 Err(Error::Read(_)) => continue,
                                 err @ Err(_) => return err,
 
@@ -214,19 +307,26 @@ impl SSHConfig {
         let mut config = vec![];
 
         for path in paths {
-            config.extend(readconf_depth(path, 0)?);
+            config.extend(readconf_depth(
+                &path,
+                ReadMeta {
+                    depth: 0,
+                    // the only non-"user" config is the system-wide `/etc/ssh/ssh_config` file
+                    user_config: path.as_ref() != &Self::system_config(),
+                },
+            )?);
         }
 
-        config.extend(SSHConfig::default().0.into_iter().filter(|_| true));
+        config.extend(Self::default().0.into_iter().filter(|_| true));
 
-        Ok(SSHConfig(config))
+        Ok(Self(config))
     }
 
-    pub fn for_host(_: &str) -> SSHConfig {
+    pub fn for_host(_: &str) -> Self {
         unimplemented!()
     }
 
-    pub fn with_config_file(self: &Self, _: &str) -> SSHConfig {
+    pub fn with_config_file(self: &Self, _: &str) -> Self {
         unimplemented!()
     }
 
@@ -246,20 +346,19 @@ mod test {
     #[cfg(not(CI))]
     fn it_works() {
         let cfg = SSHConfig::from_default_files().expect("read failed");
-        assert_eq!(
-            cfg.0[..6],
-            [
-                SSHOption::Host(String::from("github.com")),
-                SSHOption::User(String::from("git")),
-                SSHOption::Host(String::from("bitbucket.org")),
-                SSHOption::User(String::from("git")),
-                SSHOption::Host(String::from("*")),
-                SSHOption::SendEnv(vec![
-                    option::Env::Send(String::from("LANG")),
-                    option::Env::Send(String::from("LC_*"))
-                ]),
-            ]
-        )
+        let expect = [
+            SSHOption::Host(String::from("github.com")),
+            SSHOption::User(String::from("git")),
+            SSHOption::Host(String::from("bitbucket.org")),
+            SSHOption::User(String::from("git")),
+            SSHOption::Include(option::Include::Opts(vec![])),
+            SSHOption::Host(String::from("*")),
+            SSHOption::SendEnv(vec![
+                option::Env::Send(String::from("LANG")),
+                option::Env::Send(String::from("LC_*")),
+            ]),
+        ];
+        assert_eq!(cfg.0[..expect.len()], expect)
     }
 
     #[test]
