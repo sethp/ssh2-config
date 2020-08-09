@@ -179,118 +179,6 @@ impl SSHConfig {
         // oCanonicalizePermittedCNAMEs?
         // oGlobalKnownHostsFile, oUserKnownHostsFile
 
-        // Similar to SSH's `flags` parameter
-        #[derive(Copy, Clone)]
-        struct ReadMeta {
-            depth: usize,
-            user_config: bool,
-        }
-
-        fn readconf_depth<P: AsRef<Path>>(
-            path: P,
-            meta: ReadMeta,
-        ) -> Result<Vec<SSHOption>, Error> {
-            if meta.depth > MAX_READCONF_DEPTH {
-                return Err(Error::MaxDepthExceeded);
-            }
-
-            // The only depth 0 file that gets checked for perms is the user config file
-            if meta.depth > 0 || path.as_ref() == &SSHConfig::user_config() {
-                let meta = fs::metadata(&path)?;
-                let perms = meta.permissions();
-
-                if cfg!(unix) {
-                    use std::os::unix::fs::MetadataExt;
-                    use std::os::unix::fs::PermissionsExt;
-                    if (meta.uid() != 0
-                        && if cfg!(feature = "with_libc") {
-                            // SAFETY: getuid can never fail
-                            meta.uid() != unsafe { getuid() }
-                        } else {
-                            false
-                        })
-                        || perms.mode() & 0o022 != 0
-                    {
-                        return Err(Error::PermissionError);
-                    }
-                }
-            }
-
-            use option::Include::*;
-            use option::SSHOption::{IdentityFile, Include};
-            let file = File::open(path)?;
-            let mut opts = vec![];
-            for line in io::BufReader::new(file).lines() {
-                let opt = if let Some(opt) = option::parse_opt(line?)? {
-                    opt
-                } else {
-                    continue;
-                };
-
-                match opt {
-                    opt @ IdentityFile(_) => {
-                        has_identity_file = true;
-                        opts.push(opt);
-                    }
-                    Include(Paths(paths)) => {
-                        let mut globbed = vec![];
-                        for path in paths {
-                            /*
-                             * Ensure all paths are anchored. User configuration
-                             * files may begin with '~/' but system configurations
-                             * must not. If the path is relative, then treat it
-                             * as living in ~/.ssh for user configurations or
-                             * /etc/ssh for system ones.
-                             */
-                            let p = match path {
-                                p if p.starts_with("~") && !meta.user_config => {
-                                    return Err(Error::BadInclude(p));
-                                }
-                                p if p.starts_with("~") => {
-                                    String::from_utf8(tilde_expand(p.as_bytes())).unwrap_or(p)
-                                }
-                                // TODO: other platforms?
-                                p if !p.starts_with("/") => format!(
-                                    "{}/{}",
-                                    if meta.user_config {
-                                        SSHConfig::user_dir()
-                                    } else {
-                                        SSHConfig::system_dir()
-                                    }
-                                    .display(),
-                                    p
-                                ),
-                                p => p,
-                            };
-
-                            globbed.push(if let Ok(g) = glob::glob(&p) {
-                                g
-                            } else {
-                                continue;
-                            });
-                        }
-
-                        let files = globbed.into_iter().flatten().filter_map(|p| p.ok());
-                        let mut vec = vec![];
-                        let mut m = meta;
-                        m.depth += 1;
-                        for f in files {
-                            match readconf_depth(f, m) {
-                                Err(Error::Read(_)) => continue,
-                                err @ Err(_) => return err,
-
-                                Ok(o) => vec.extend(o),
-                            }
-                        }
-                        opts.push(Include(Opts(vec)))
-                    }
-
-                    opt => opts.push(opt),
-                }
-            }
-            Ok(opts)
-        }
-
         let mut config = vec![];
 
         for path in paths {
@@ -338,6 +226,111 @@ impl SSHConfig {
     pub fn system_config() -> PathBuf {
         Self::system_dir().join("ssh_config")
     }
+}
+
+// Similar to SSH's `flags` parameter
+#[derive(Copy, Clone)]
+struct ReadMeta {
+    depth: usize,
+    user_config: bool,
+}
+
+fn readconf_depth<P: AsRef<Path>>(path: P, meta: ReadMeta) -> Result<Vec<SSHOption>, Error> {
+    if meta.depth > MAX_READCONF_DEPTH {
+        return Err(Error::MaxDepthExceeded);
+    }
+
+    // The only depth 0 file that gets checked for perms is the user config file
+    if meta.depth > 0 || path.as_ref() == &SSHConfig::user_config() {
+        let meta = fs::metadata(&path)?;
+        let perms = meta.permissions();
+
+        if cfg!(unix) {
+            use std::os::unix::fs::MetadataExt;
+            use std::os::unix::fs::PermissionsExt;
+            if (meta.uid() != 0
+                && if cfg!(feature = "with_libc") {
+                    // SAFETY: getuid can never fail
+                    meta.uid() != unsafe { getuid() }
+                } else {
+                    false
+                })
+                || perms.mode() & 0o022 != 0
+            {
+                return Err(Error::PermissionError);
+            }
+        }
+    }
+
+    use option::Include::*;
+    use option::SSHOption::Include;
+    let file = File::open(path)?;
+    let mut opts = vec![];
+    for line in io::BufReader::new(file).lines() {
+        let opt = if let Some(opt) = option::parse_opt(line?)? {
+            opt
+        } else {
+            continue;
+        };
+
+        match opt {
+            Include(Paths(paths)) => {
+                let mut globbed = vec![];
+                for path in paths {
+                    /*
+                     * Ensure all paths are anchored. User configuration
+                     * files may begin with '~/' but system configurations
+                     * must not. If the path is relative, then treat it
+                     * as living in ~/.ssh for user configurations or
+                     * /etc/ssh for system ones.
+                     */
+                    let p = match path {
+                        p if p.starts_with("~") && !meta.user_config => {
+                            return Err(Error::BadInclude(p));
+                        }
+                        p if p.starts_with("~") => {
+                            String::from_utf8(tilde_expand(p.as_bytes())).unwrap_or(p)
+                        }
+                        // TODO: other platforms?
+                        p if !p.starts_with("/") => format!(
+                            "{}/{}",
+                            if meta.user_config {
+                                SSHConfig::user_dir()
+                            } else {
+                                SSHConfig::system_dir()
+                            }
+                            .display(),
+                            p
+                        ),
+                        p => p,
+                    };
+
+                    globbed.push(if let Ok(g) = glob::glob(&p) {
+                        g
+                    } else {
+                        continue;
+                    });
+                }
+
+                let files = globbed.into_iter().flatten().filter_map(|p| p.ok());
+                let mut vec = vec![];
+                let mut m = meta;
+                m.depth += 1;
+                for f in files {
+                    match readconf_depth(f, m) {
+                        Err(Error::Read(_)) => continue,
+                        err @ Err(_) => return err,
+
+                        Ok(o) => vec.extend(o),
+                    }
+                }
+                opts.push(Include(Opts(vec)))
+            }
+
+            opt => opts.push(opt),
+        }
+    }
+    Ok(opts)
 }
 
 #[cfg(test)]
