@@ -15,6 +15,7 @@ use std::str::MatchIndices;
 #[derive(Debug, PartialEq, Eq)]
 #[allow(missing_docs)]
 #[non_exhaustive]
+// TODO: OsString for paths & env vars?
 pub enum SSHOption {
     User(String),
     Port(u16),

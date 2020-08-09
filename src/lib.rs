@@ -160,22 +160,6 @@ impl SSHConfig {
         Self::from_files(&[&Self::user_config(), &Self::system_config()])
     }
 
-    fn user_dir() -> PathBuf {
-        [homedir(), OsString::from(".ssh")].iter().collect()
-    }
-
-    pub fn user_config() -> PathBuf {
-        Self::user_dir().join("config")
-    }
-
-    fn system_dir() -> PathBuf {
-        ["/etc", "ssh"].iter().collect()
-    }
-
-    pub fn system_config() -> PathBuf {
-        Self::system_dir().join("ssh_config")
-    }
-
     pub fn from_file<P>(path: P) -> Result<Self, Error>
     where
         P: AsRef<Path>,
@@ -195,9 +179,8 @@ impl SSHConfig {
         // oCanonicalizePermittedCNAMEs?
         // oGlobalKnownHostsFile, oUserKnownHostsFile
 
-        #[allow(unused)]
-        #[derive(Copy, Clone)]
         // Similar to SSH's `flags` parameter
+        #[derive(Copy, Clone)]
         struct ReadMeta {
             depth: usize,
             user_config: bool,
@@ -234,7 +217,7 @@ impl SSHConfig {
             }
 
             use option::Include::*;
-            use option::SSHOption::Include;
+            use option::SSHOption::{IdentityFile, Include};
             let file = File::open(path)?;
             let mut opts = vec![];
             for line in io::BufReader::new(file).lines() {
@@ -245,6 +228,10 @@ impl SSHConfig {
                 };
 
                 match opt {
+                    opt @ IdentityFile(_) => {
+                        has_identity_file = true;
+                        opts.push(opt);
+                    }
                     Include(Paths(paths)) => {
                         let mut globbed = vec![];
                         for path in paths {
@@ -317,6 +304,8 @@ impl SSHConfig {
             )?);
         }
 
+        // TODO: this is too early to apply defaults anyway – seeing a value in the config
+        // doesn't mean it's "active"
         config.extend(Self::default().0.into_iter().filter(|_| true));
 
         Ok(Self(config))
@@ -332,6 +321,22 @@ impl SSHConfig {
 
     pub fn connect_with_auth(self: &Self) -> ssh2::Session {
         unimplemented!()
+    }
+
+    fn user_dir() -> PathBuf {
+        [homedir(), OsString::from(".ssh")].iter().collect()
+    }
+
+    fn system_dir() -> PathBuf {
+        ["/etc", "ssh"].iter().collect()
+    }
+
+    pub fn user_config() -> PathBuf {
+        Self::user_dir().join("config")
+    }
+
+    pub fn system_config() -> PathBuf {
+        Self::system_dir().join("ssh_config")
     }
 }
 
