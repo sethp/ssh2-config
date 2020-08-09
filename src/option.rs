@@ -116,7 +116,7 @@ where
             "sendenv" => Ok(SendEnv(
                 args.map(|maybe_arg| {
                     maybe_arg.map(|arg| {
-                        if arg.starts_with("-") {
+                        if arg.starts_with('-') {
                             Env::Stop(arg[1..].to_string())
                         } else {
                             Env::Send(arg)

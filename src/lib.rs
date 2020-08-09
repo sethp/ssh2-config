@@ -27,18 +27,19 @@ extern crate libc;
 use {libc::getuid, tilde_expand::tilde_expand};
 
 #[cfg(not(feature = "with_libc"))]
-fn getuid() -> u16 {
+unsafe fn getuid() -> u32 {
     unimplemented!()
 }
 
-#[cfg(not(feature = "with_libc"))]
+#[cfg(all(unix, not(feature = "with_libc")))]
 fn tilde_expand(s: &[u8]) -> Vec<u8> {
-    if s.starts_with("~/") {
-        let mut r = Vec::new(homedir().into_bytes());
-        r.extend(s[2..]);
+    use std::os::unix::ffi::OsStringExt;
+    if s.starts_with(b"~/") {
+        let mut r = homedir().into_vec();
+        r.extend(&s[2..]);
         r
     } else {
-        Vec::new(s)
+        Vec::from(s)
     }
 }
 
@@ -187,7 +188,7 @@ impl SSHConfig {
                 ReadMeta {
                     depth: 0,
                     // the only non-"user" config is the system-wide `/etc/ssh/ssh_config` file
-                    user_config: path.as_ref() != &Self::system_config(),
+                    user_config: *path.as_ref() != Self::system_config(),
                 },
             )?);
         }
@@ -241,7 +242,7 @@ fn readconf_depth<P: AsRef<Path>>(path: P, meta: ReadMeta) -> Result<Vec<SSHOpti
     }
 
     // The only depth 0 file that gets checked for perms is the user config file
-    if meta.depth > 0 || path.as_ref() == &SSHConfig::user_config() {
+    if meta.depth > 0 || *path.as_ref() == SSHConfig::user_config() {
         let meta = fs::metadata(&path)?;
         let perms = meta.permissions();
 
@@ -285,14 +286,14 @@ fn readconf_depth<P: AsRef<Path>>(path: P, meta: ReadMeta) -> Result<Vec<SSHOpti
                      * /etc/ssh for system ones.
                      */
                     let p = match path {
-                        p if p.starts_with("~") && !meta.user_config => {
+                        p if p.starts_with('~') && !meta.user_config => {
                             return Err(Error::BadInclude(p));
                         }
-                        p if p.starts_with("~") => {
+                        p if p.starts_with('~') => {
                             String::from_utf8(tilde_expand(p.as_bytes())).unwrap_or(p)
                         }
                         // TODO: other platforms?
-                        p if !p.starts_with("/") => format!(
+                        p if !p.starts_with('/') => format!(
                             "{}/{}",
                             if meta.user_config {
                                 SSHConfig::user_dir()
