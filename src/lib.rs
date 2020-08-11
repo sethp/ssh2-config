@@ -10,6 +10,10 @@
 //! // Make sure we're authenticated
 //! assert!(sess.authenticated());
 //! ```
+//!
+//! The guiding rule for this crate is that we may accept configurations OpenSSH won't, but
+//! we won't reject configurations that OpenSSH would consider valid. The lone exception to
+//! that rule is that we do require that all config files and file paths are valid unicode.
 
 // TODO
 // #![doc(html_root_url = "https://docs.rs/ssh2-config")]
@@ -54,9 +58,13 @@ use std::fs::{self, File};
 use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 
-#[allow(missing_docs)]
 #[derive(Debug)]
-// https://man.openbsd.org/OpenBSD-current/man5/ssh_config.5
+/// SSHConfig represents a parsed ssh configuration. The format is roughly documented in [ssh_config(5)], and
+/// exhaustively documented in this crate's option module.
+///
+/// [ssh_config(5)]: https://man.openbsd.org/OpenBSD-current/man5/ssh_config.5
+///
+/// A config may include multiple copies of options and inactive options: TODO examples, details
 pub struct SSHConfig(pub Vec<option::SSHOption>);
 
 // #[allow(missing_docs)]
@@ -82,6 +90,7 @@ pub enum Error {
     MaxDepthExceeded,
     PermissionError,
     BadInclude(String),
+    PathInvalidUnicode(PathBuf, Option<std::str::Utf8Error>),
 }
 
 impl std::error::Error for Error {
@@ -108,6 +117,16 @@ impl fmt::Display for Error {
                 write!(f, "Bad owner or permissions (writable by group or world)")
             }
             Error::BadInclude(ref path) => write!(f, "bad include path: {}", path),
+
+            Error::PathInvalidUnicode(ref path, None) => {
+                write!(f, "invalid unicode in path: {}", path.to_string_lossy())
+            }
+            Error::PathInvalidUnicode(ref path, Some(ref err)) => write!(
+                f,
+                "invalid unicode in path: {} ({})",
+                path.to_string_lossy(),
+                err
+            ),
         }
     }
 }
@@ -127,6 +146,17 @@ impl From<io::Error> for Error {
 impl From<option::Error> for Error {
     fn from(e: option::Error) -> Self {
         Error::Parse(e)
+    }
+}
+
+impl From<std::string::FromUtf8Error> for Error {
+    #[cfg(unix)]
+    fn from(e: std::string::FromUtf8Error) -> Self {
+        use std::os::unix::ffi::OsStringExt;
+        let err = e.utf8_error();
+        let path = PathBuf::from(OsString::from_vec(e.into_bytes()));
+
+        Error::PathInvalidUnicode(path, Some(err))
     }
 }
 
@@ -158,7 +188,11 @@ fn homedir() -> OsString {
 #[allow(missing_docs)]
 impl SSHConfig {
     pub fn from_default_files() -> Result<Self, Error> {
-        Self::from_files(&[&Self::user_config(), &Self::system_config()])
+        Self::from_files(
+            [&Self::user_config(), &Self::system_config()]
+                .iter()
+                .filter(|p| p.exists()),
+        )
     }
 
     pub fn from_file<P>(path: P) -> Result<Self, Error>
@@ -265,7 +299,12 @@ fn readconf_depth<P: AsRef<Path>>(path: P, meta: ReadMeta) -> Result<Vec<SSHOpti
 
     use option::Include::*;
     use option::SSHOption::Include;
-    let file = File::open(path)?;
+    let file = File::open(&path)?;
+    let _filename = if let Some(s) = path.as_ref().to_str() {
+        s
+    } else {
+        return Err(Error::PathInvalidUnicode(path.as_ref().to_path_buf(), None));
+    };
     let mut opts = vec![];
     for line in io::BufReader::new(file).lines() {
         let opt = if let Some(opt) = option::parse_opt(line?)? {
@@ -289,20 +328,21 @@ fn readconf_depth<P: AsRef<Path>>(path: P, meta: ReadMeta) -> Result<Vec<SSHOpti
                         p if p.starts_with('~') && !meta.user_config => {
                             return Err(Error::BadInclude(p));
                         }
-                        p if p.starts_with('~') => {
-                            String::from_utf8(tilde_expand(p.as_bytes())).unwrap_or(p)
-                        }
-                        // TODO: other platforms?
-                        p if !p.starts_with('/') => format!(
-                            "{}/{}",
-                            if meta.user_config {
+                        p if p.starts_with('~') => String::from_utf8(tilde_expand(p.as_bytes()))?,
+                        p if !Path::new(&p).has_root() => {
+                            let anchor = if meta.user_config {
                                 SSHConfig::user_dir()
                             } else {
                                 SSHConfig::system_dir()
+                            };
+                            let path = anchor.join(p);
+
+                            if let Some(s) = path.to_str() {
+                                s.to_owned()
+                            } else {
+                                return Err(Error::PathInvalidUnicode(path, None));
                             }
-                            .display(),
-                            p
-                        ),
+                        }
                         p => p,
                     };
 
@@ -319,6 +359,7 @@ fn readconf_depth<P: AsRef<Path>>(path: P, meta: ReadMeta) -> Result<Vec<SSHOpti
                 m.depth += 1;
                 for f in files {
                     match readconf_depth(f, m) {
+                        Err(Error::Read(e)) if e.kind() == io::ErrorKind::InvalidData => Err(e)?,
                         Err(Error::Read(_)) => continue,
                         err @ Err(_) => return err,
 
