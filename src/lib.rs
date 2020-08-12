@@ -471,26 +471,6 @@ mod test {
     use tempfile::tempdir;
 
     #[test]
-    // TODO remove and/or figure out how to chroot in CI
-    #[cfg(not(CI))]
-    fn it_works() {
-        let cfg = SSHConfig::from_default_files().expect("read failed");
-        let expect = [
-            SSHOption::Host(String::from("github.com")),
-            SSHOption::User(String::from("git")),
-            SSHOption::Host(String::from("bitbucket.org")),
-            SSHOption::User(String::from("git")),
-            SSHOption::Include(option::Include::Opts(vec![])),
-            SSHOption::Host(String::from("*")),
-            SSHOption::SendEnv(vec![
-                option::Env::Send(String::from("LANG")),
-                option::Env::Send(String::from("LC_*")),
-            ]),
-        ];
-        assert_eq!(cfg.0[..expect.len()], expect)
-    }
-
-    #[test]
     fn err_context() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config");
