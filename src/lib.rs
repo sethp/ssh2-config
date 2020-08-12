@@ -82,6 +82,48 @@ impl std::default::Default for SSHConfig {
     }
 }
 
+/// FileError is an error tied to a particular place in a file
+#[derive(Debug)]
+pub struct FileError {
+    /// filename is the name of the file where the error occurred
+    pub filename: String,
+    /// lineno is the line number within the file, or 0
+    pub lineno: usize,
+    /// err is the error
+    pub err: Error,
+}
+
+impl std::error::Error for FileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.err)
+    }
+}
+
+impl fmt::Display for FileError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match (self.filename.as_str(), self.lineno) {
+            ("", 0) => fmt::Display::fmt(&self.err, f),
+            (_, 0) => write!(f, "{}: {}", self.filename, self.err),
+            _ => write!(f, "{}:{} {}", self.filename, self.lineno, self.err),
+        }
+    }
+}
+
+impl<S, E> From<((S, usize), E)> for FileError
+where
+    S: AsRef<str>,
+    Error: From<E>,
+{
+    fn from(o: ((S, usize), E)) -> Self {
+        let ((filename, lineno), err) = o;
+        FileError {
+            filename: filename.as_ref().to_owned(),
+            lineno,
+            err: From::from(err),
+        }
+    }
+}
+
 #[allow(missing_docs)]
 #[derive(Debug)]
 pub enum Error {
@@ -187,7 +229,7 @@ fn homedir() -> OsString {
 
 #[allow(missing_docs)]
 impl SSHConfig {
-    pub fn from_default_files() -> Result<Self, Error> {
+    pub fn from_default_files() -> Result<Self, FileError> {
         Self::from_files(
             [&Self::user_config(), &Self::system_config()]
                 .iter()
@@ -195,14 +237,14 @@ impl SSHConfig {
         )
     }
 
-    pub fn from_file<P>(path: P) -> Result<Self, Error>
+    pub fn from_file<P>(path: P) -> Result<Self, FileError>
     where
         P: AsRef<Path>,
     {
         Self::from_files(std::iter::once(path))
     }
 
-    pub fn from_files<I, P>(paths: I) -> Result<Self, Error>
+    pub fn from_files<I, P>(paths: I) -> Result<Self, FileError>
     where
         P: AsRef<Path>,
         I: IntoIterator<Item = P>,
@@ -270,14 +312,25 @@ struct ReadMeta {
     user_config: bool,
 }
 
-fn readconf_depth<P: AsRef<Path>>(path: P, meta: ReadMeta) -> Result<Vec<SSHOption>, Error> {
+fn readconf_depth<P: AsRef<Path>>(path: P, meta: ReadMeta) -> Result<Vec<SSHOption>, FileError> {
+    let filename = if let Some(s) = path.as_ref().to_str() {
+        s
+    } else {
+        return Err(Error::PathInvalidUnicode(path.as_ref().to_path_buf(), None))
+            .zip_err(("", 0))?;
+    };
+
     if meta.depth > MAX_READCONF_DEPTH {
-        return Err(Error::MaxDepthExceeded);
+        return Err(FileError {
+            filename: filename.to_owned(),
+            lineno: 0,
+            err: Error::MaxDepthExceeded,
+        });
     }
 
     // The only depth 0 file that gets checked for perms is the user config file
     if meta.depth > 0 || *path.as_ref() == SSHConfig::user_config() {
-        let meta = fs::metadata(&path)?;
+        let meta = fs::metadata(&path).zip_err((filename, 0))?;
         let perms = meta.permissions();
 
         if cfg!(unix) {
@@ -292,22 +345,22 @@ fn readconf_depth<P: AsRef<Path>>(path: P, meta: ReadMeta) -> Result<Vec<SSHOpti
                 })
                 || perms.mode() & 0o022 != 0
             {
-                return Err(Error::PermissionError);
+                return Err(FileError {
+                    filename: filename.to_owned(),
+                    lineno: 0,
+                    err: Error::PermissionError,
+                });
             }
         }
     }
 
     use option::Include::*;
     use option::SSHOption::Include;
-    let file = File::open(&path)?;
-    let _filename = if let Some(s) = path.as_ref().to_str() {
-        s
-    } else {
-        return Err(Error::PathInvalidUnicode(path.as_ref().to_path_buf(), None));
-    };
+    let file = File::open(&path).zip_err((filename, 0))?;
     let mut opts = vec![];
-    for line in io::BufReader::new(file).lines() {
-        let opt = if let Some(opt) = option::parse_opt(line?)? {
+    for (lineno, line) in (1..).zip(io::BufReader::new(file).lines()) {
+        let line = line.zip_err((filename, lineno))?;
+        let opt = if let Some(opt) = option::parse_opt(line).zip_err((filename, lineno))? {
             opt
         } else {
             continue;
@@ -326,9 +379,14 @@ fn readconf_depth<P: AsRef<Path>>(path: P, meta: ReadMeta) -> Result<Vec<SSHOpti
                      */
                     let p = match path {
                         p if p.starts_with('~') && !meta.user_config => {
-                            return Err(Error::BadInclude(p));
+                            return Err(FileError {
+                                filename: filename.to_owned(),
+                                lineno,
+                                err: Error::BadInclude(p),
+                            });
                         }
-                        p if p.starts_with('~') => String::from_utf8(tilde_expand(p.as_bytes()))?,
+                        p if p.starts_with('~') => String::from_utf8(tilde_expand(p.as_bytes()))
+                            .zip_err((filename, lineno))?,
                         p if !Path::new(&p).has_root() => {
                             let anchor = if meta.user_config {
                                 SSHConfig::user_dir()
@@ -340,7 +398,11 @@ fn readconf_depth<P: AsRef<Path>>(path: P, meta: ReadMeta) -> Result<Vec<SSHOpti
                             if let Some(s) = path.to_str() {
                                 s.to_owned()
                             } else {
-                                return Err(Error::PathInvalidUnicode(path, None));
+                                return Err(FileError {
+                                    filename: filename.to_owned(),
+                                    lineno,
+                                    err: Error::PathInvalidUnicode(path, None),
+                                });
                             }
                         }
                         p => p,
@@ -359,10 +421,21 @@ fn readconf_depth<P: AsRef<Path>>(path: P, meta: ReadMeta) -> Result<Vec<SSHOpti
                 m.depth += 1;
                 for f in files {
                     match readconf_depth(f, m) {
-                        Err(Error::Read(e)) if e.kind() == io::ErrorKind::InvalidData => {
-                            return Err(e.into())
+                        Err(FileError {
+                            err: Error::Read(e),
+                            filename,
+                            lineno,
+                        }) if e.kind() == io::ErrorKind::InvalidData => {
+                            return Err(FileError {
+                                err: Error::Read(e),
+                                filename,
+                                lineno,
+                            })
                         }
-                        Err(Error::Read(_)) => continue,
+                        Err(FileError {
+                            err: Error::Read(_),
+                            ..
+                        }) => continue,
                         err @ Err(_) => return err,
 
                         Ok(o) => vec.extend(o),
@@ -377,10 +450,24 @@ fn readconf_depth<P: AsRef<Path>>(path: P, meta: ReadMeta) -> Result<Vec<SSHOpti
     Ok(opts)
 }
 
+trait ZipErr<T, U, E> {
+    fn zip_err(self, u: U) -> Result<T, (U, E)>;
+}
+
+impl<T, U, E> ZipErr<T, U, E> for Result<T, E> {
+    fn zip_err(self, u: U) -> Result<T, (U, E)> {
+        match self {
+            Ok(v) => Ok(v),
+            Err(e) => Err((u, e)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
-    use super::{option, SSHConfig, SSHOption, MAX_READCONF_DEPTH};
+    use super::{option, Error, FileError, SSHConfig, SSHOption, MAX_READCONF_DEPTH};
     use std::fs;
+    use std::path::Path;
     use tempfile::tempdir;
 
     #[test]
@@ -401,6 +488,22 @@ mod test {
             ]),
         ];
         assert_eq!(cfg.0[..expect.len()], expect)
+    }
+
+    #[test]
+    fn err_context() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config");
+        fs::write(&path, r"Badopt").expect("failed writing config");
+        let err = SSHConfig::from_file(&path).expect_err("parse should have failed");
+
+        assert!(
+            Path::new(&err.filename).ends_with("config"),
+            "expected file path ending in `config`, got: {}",
+            err.filename
+        );
+        assert_eq!(err.lineno, 1);
+        assert_matches!(err.err, Error::Parse(_));
     }
 
     #[test]
@@ -448,12 +551,13 @@ mod test {
             }
         }
 
-        let err = SSHConfig::from_file(dir.path().join(format!("file_{}", MAX_READCONF_DEPTH + 1)))
-            .expect_err("parse should have failed");
+        let FileError { err, .. } =
+            SSHConfig::from_file(dir.path().join(format!("file_{}", MAX_READCONF_DEPTH + 1)))
+                .expect_err("parse should have failed");
 
         assert_eq!(
             std::mem::discriminant(&err),
-            std::mem::discriminant(&super::Error::MaxDepthExceeded),
+            std::mem::discriminant(&Error::MaxDepthExceeded),
         )
     }
 }

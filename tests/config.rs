@@ -1,6 +1,6 @@
 use ssh2_config::{
     option::{self, parse_opt, SSHOption},
-    Error, SSHConfig, MAX_READCONF_DEPTH,
+    Error, FileError, SSHConfig, MAX_READCONF_DEPTH,
 };
 use std::fs;
 use std::io;
@@ -452,7 +452,8 @@ fn deep_includes() {
     assert!(output.status.success());
 
     let bad_file = dir.path().join(format!("file_{}", MAX_READCONF_DEPTH + 1));
-    let err = SSHConfig::from_file(&bad_file).expect_err("parse should have failed");
+    let FileError { err, .. } =
+        SSHConfig::from_file(&bad_file).expect_err("parse should have failed");
 
     assert_eq!(
         std::mem::discriminant(&err),
