@@ -359,7 +359,9 @@ fn readconf_depth<P: AsRef<Path>>(path: P, meta: ReadMeta) -> Result<Vec<SSHOpti
                 m.depth += 1;
                 for f in files {
                     match readconf_depth(f, m) {
-                        Err(Error::Read(e)) if e.kind() == io::ErrorKind::InvalidData => Err(e)?,
+                        Err(Error::Read(e)) if e.kind() == io::ErrorKind::InvalidData => {
+                            return Err(e.into())
+                        }
                         Err(Error::Read(_)) => continue,
                         err @ Err(_) => return err,
 
