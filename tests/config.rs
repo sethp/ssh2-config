@@ -1,7 +1,10 @@
-use ssh2_config::option::{parse_opt, SSHOption};
+use ssh2_config::{
+    option::{self, parse_opt, SSHOption},
+    Error, SSHConfig, MAX_READCONF_DEPTH,
+};
 use std::fs;
 use std::io;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Cursor, Write};
 use std::process::{Command, Stdio};
 use tempfile::tempdir;
 
@@ -362,6 +365,113 @@ fn bad_comments() {
 
     assert!(
         err.ends_with("line 1: garbage at end of line; \"#\"."),
+        "Got: {}",
+        err
+    );
+}
+
+#[test]
+fn includes() {
+    let dir = tempdir().unwrap();
+    let subdir = dir.path().join("subdir");
+    fs::create_dir(&subdir).unwrap();
+    fs::write(dir.path().join("file_0"), r"").expect("failed writing config");
+    fs::write(dir.path().join("file_1"), r"").expect("failed writing config");
+    let cases = &[
+        format!("Include"),
+        format!("Include {}", subdir.display()),
+        format!("Include {}", dir.path().join("file_0").display()),
+        format!("Include {}", dir.path().join("file_[bl").display()),
+        format!(
+            "Include {} {}",
+            dir.path().join("file_*").display(),
+            dir.path().join("f*").display()
+        ),
+        format!("Include file_dne"),
+    ];
+
+    for case in cases {
+        let path = dir.path().join("cfg");
+        fs::write(&path, case).expect("failed writing config");
+
+        let output = Command::new("ssh")
+            .args(&["-T", "-F", path.to_str().unwrap(), "-G", "example.com"])
+            .output()
+            .expect("failed to execute process");
+        io::stderr().write_all(&output.stderr).unwrap();
+        assert!(output.status.success());
+
+        SSHConfig::from_file(&path).expect("failed to read config");
+    }
+}
+
+#[test]
+fn deep_includes() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("file_0"), r"Host example.com").expect("failed writing config");
+
+    for rdepth in 1..(MAX_READCONF_DEPTH + 2) {
+        let file = dir.path().join(format!("file_{}", rdepth));
+        fs::write(
+            file,
+            format!(
+                "Include {}",
+                dir.path().join(format!("file_{}", rdepth - 1)).display(),
+            ),
+        )
+        .expect("failed writing config");
+    }
+
+    let deep_cfg_file = dir.path().join(format!("file_{}", MAX_READCONF_DEPTH));
+    let mut deep_cfg = SSHConfig::from_file(&deep_cfg_file)
+        .expect("failed to read config")
+        .0
+        .into_iter()
+        .next()
+        .unwrap();
+    for d in 1..MAX_READCONF_DEPTH {
+        deep_cfg = match deep_cfg {
+            SSHOption::Include(option::Include::Opts(mut opts)) => {
+                assert_eq!(opts.len(), 1);
+                opts.pop().unwrap()
+            }
+            bad @ _ => panic!("failed to unwrap Include: saw {:?} at depth {}", bad, d),
+        }
+    }
+
+    let output = Command::new("ssh")
+        .args(&[
+            "-T",
+            "-F",
+            deep_cfg_file.to_str().unwrap(),
+            "-G",
+            "example.com",
+        ])
+        .output()
+        .expect("failed to execute process");
+    assert!(output.status.success());
+
+    let bad_file = dir.path().join(format!("file_{}", MAX_READCONF_DEPTH + 1));
+    let err = SSHConfig::from_file(&bad_file).expect_err("parse should have failed");
+
+    assert_eq!(
+        std::mem::discriminant(&err),
+        std::mem::discriminant(&Error::MaxDepthExceeded),
+    );
+
+    let output = Command::new("ssh")
+        .args(&["-T", "-F", bad_file.to_str().unwrap(), "-G", "example.com"])
+        .output()
+        .expect("failed to execute process");
+
+    assert!(!output.status.success());
+    let mut lines = io::BufReader::new(Cursor::new(output.stdout)).lines();
+    assert!(lines.next().is_none());
+    let mut err_lines = io::BufReader::new(Cursor::new(output.stderr)).lines();
+
+    let err = &err_lines.next().unwrap().unwrap();
+    assert!(
+        err.ends_with("Too many recursive configuration includes"),
         "Got: {}",
         err
     );

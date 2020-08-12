@@ -1,0 +1,20 @@
+{
+    "cSpell.ignoreWords": [
+        "busa",
+        "haya",
+        "haya busa",
+        "keypart",
+        "rustflags",
+        "sess",
+        "tempdir",
+        "tempfile"
+    ],
+    "cSpell.words": [
+        "libc",
+        "open",
+        "open ssh",
+        "readconf",
+        "ssh",
+        "ssh's"
+    ]
+}

@@ -15,19 +15,49 @@ use std::str::MatchIndices;
 #[derive(Debug, PartialEq, Eq)]
 #[allow(missing_docs)]
 #[non_exhaustive]
+// TODO: OsString for paths & env vars?
 pub enum SSHOption {
     User(String),
     Port(u16),
     Hostname(String),
+
+    Host(String),
+    SendEnv(Vec<Env>),
+    Include(Include),
+}
+
+/// Env represents an environment variable pattern for the `SendEnv` directive.
+///
+/// SendEnv may either express a positive or negative pattern to send along or
+/// stop the sending of a variable respectively.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Env {
+    /// Send is a positive pattern: "send along matching env vars"
+    Send(String),
+    /// Stop is a negative pattern: "do not send matching env vars from a previous directive"
+    Stop(String),
+}
+
+/// Include represents the nested config structure provided by an include directive.
+///
+/// We preserve the nested structure in order to handle nested Host/Match states.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Include {
+    /// Paths is a list of file patterns to include.
+    Paths(Vec<String>),
+    /// Opts is a concatenated list of parsed options from an included file.
+    Opts(Vec<SSHOption>),
 }
 
 /// parse_opt reads a single option from a single line of config.
 ///
 /// The ssh_config format is entirely line-oriented (no option may span multiple lines), so it's best to use
-/// this in coordination with [`str::lines`]. This function returns `Result<Option<_>, _>` as it is possible
-/// to successfully parse no option from either a comment or a blank line.
+/// this in coordination with either [`str::lines`] or [`io::Lines`]. This function returns
+/// `Result<Option<_>, _>` as it is possible to successfully parse no option from
+/// either a comment or a blank line.
 ///
 /// [`str::lines`]: https://doc.rust-lang.org/std/primitive.str.html#method.lines
+/// [`io::Lines`]: https://doc.rust-lang.org/std/io/struct.Lines.html
 ///
 /// # Example
 ///
@@ -47,8 +77,11 @@ pub enum SSHOption {
 ///     vec![SSHOption::Hostname(String::from("example.com")), SSHOption::Port(22)],
 /// );
 /// ```
-pub fn parse_opt(line: &str) -> Result<Option<SSHOption>, Error> {
-    parse_tokens(line, |keyword, args| {
+pub fn parse_opt<S>(line: S) -> Result<Option<SSHOption>, Error>
+where
+    S: AsRef<str>,
+{
+    parse_tokens(line.as_ref(), |keyword, args| {
         std::convert::TryFrom::try_from((keyword, args))
     })
 }
@@ -74,24 +107,58 @@ where
         // TODO: it's a context-sensitive grammar for UserKnownHostsFile, GlobalKnownHostsFile, and RekeyLimit.
         use SSHOption::*;
 
+        // TODO: unicase?
         match keyword.to_ascii_lowercase().as_str() {
             "user" => args.map_owned(User),
             "port" => args.map_next(|arg, _| Ok(Port(a2port(arg)?))),
             "hostname" => args.map_owned(Hostname),
+            "host" => args.map_owned(Host),
+            "sendenv" => Ok(SendEnv(
+                args.map(|maybe_arg| {
+                    maybe_arg.map(|arg| {
+                        if arg.starts_with('-') {
+                            Env::Stop(arg[1..].to_string())
+                        } else {
+                            Env::Send(arg)
+                        }
+                    })
+                })
+                .collect::<Result<_, _>>()?,
+            )),
+            // TODO: filter empty
+            "include" => Ok(Include(self::Include::Paths(
+                args.collect::<Result<_, _>>()?,
+            ))),
 
             _ => Err(Error::from(DetailedError::BadOption(keyword.to_string()))),
         }
     }
 }
 
+/// a2port converts an "array" of characters into a port number
+///
+/// It does so by first attempting to parse the given characters as an 16-bit integer.
+/// On failure, and on systems with libc enabled, it will then check the string against the
+/// `/etc/services` database to see if the argument refers to a well-known named port.
+///
+/// See also: [misc.c] and [getservbyname].
+///
+/// [misc.c]: https://github.com/openssh/openssh-portable/blob/e073106f370cdd2679e41f6f55a37b491f0e82fe/misc.c#L414-L432
+/// [getservbyname]: https://man7.org/linux/man-pages/man3/getservbyname.3p.html
+pub fn a2port<S>(s: S) -> Result<u16, std::num::ParseIntError>
+where
+    S: AsRef<str>,
+{
+    _a2port(s.as_ref())
+}
+
 #[cfg(not(feature = "with_libc"))]
-fn a2port(s: &str) -> Result<u16, std::num::ParseIntError> {
+fn _a2port(s: &str) -> Result<u16, std::num::ParseIntError> {
     s.parse()
 }
 
-// See: https://github.com/openssh/openssh-portable/blob/e073106f370cdd2679e41f6f55a37b491f0e82fe/misc.c#L414-L432
 #[cfg(feature = "with_libc")]
-fn a2port(s: &str) -> Result<u16, std::num::ParseIntError> {
+fn _a2port(s: &str) -> Result<u16, std::num::ParseIntError> {
     use libc::getservbyname;
     use std::convert::TryInto;
     use std::ffi::CString;
@@ -182,7 +249,7 @@ where
 
     match args.0.next() {
         None => Ok(res),
-        // COMPAT: allow anything following an "empty" arguments
+        // COMPAT: allow anything following an "empty" argument
         Some(Token::Delim) => Ok(res),
         Some(Token::Word(s)) | Some(Token::Quoted(s)) if s.is_empty() => Ok(res),
         // END COMPAT
@@ -271,7 +338,7 @@ impl From<DetailedError> for Error {
     }
 }
 
-/// `tokens` converts a string into an iterator of [`Token`s], intended for use with [`str::lines`].
+/// `tokens` converts a string into an iterator of [`Token`s], intended for use with e.g. [`str::lines`].
 ///
 /// These token streams are not complete, choosing to omit end-of-line blank characters as these have
 /// no semantic importance to the format. For more details on the SSH option format, see [`Args`]
@@ -479,7 +546,7 @@ impl<'a> Arguments for Args<'a> {
 /// See:
 /// - `SSHOption.try_from((&str, &mut Arguments))`
 /// - `Args`
-pub trait Arguments: IntoIterator<Item = Result<String, Error>> {
+pub trait Arguments: Iterator<Item = Result<String, Error>> {
     /// map_next provides access to the next argument and subsequent arguments
     fn map_next<T, F>(self: &mut Self, f: F) -> Result<T, Error>
     where
@@ -604,9 +671,7 @@ impl<'a> Iterator for Tokens<'a> {
 
 #[cfg(test)]
 mod test {
-    use super::SSHOption;
-    use super::Token::*;
-    use super::{parse_tokens, tokens, Arguments, Error};
+    use super::{parse_tokens, tokens, Args, Arguments, Env, Error, Include, SSHOption, Token::*};
     use itertools::Itertools;
 
     #[test]
@@ -857,6 +922,37 @@ mod test {
         if cfg!(feature = "with_libc") {
             assert_parse!(r#"Port ssh"#, SSHOption::Port(22));
         }
+        assert_parse!(r#"Host *"#, SSHOption::Host(String::from("*")));
+        assert_parse!(
+            r#"Host example.com"#,
+            SSHOption::Host(String::from("example.com"))
+        );
+        assert_parse!(
+            r#"SendEnv LANG LC_* -SUPER_SECRET"#,
+            SSHOption::SendEnv(vec![
+                Env::Send(String::from("LANG")),
+                Env::Send(String::from("LC_*")),
+                Env::Stop(String::from("SUPER_SECRET")),
+            ])
+        );
+        assert_parse!(
+            r"Include site.d/*",
+            SSHOption::Include(Include::Paths(vec![String::from("site.d/*")]))
+        );
+    }
+
+    #[test]
+    fn test_args_iter() {
+        assert_eq!(
+            Args::new(tokens("Arg1 Arg2 Arg3"))
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            vec![
+                String::from("Arg1"),
+                String::from("Arg2"),
+                String::from("Arg3")
+            ]
+        );
     }
 }
 
@@ -918,8 +1014,11 @@ pub mod simple {
     ///     vec![SSHOption::Hostname(String::from("example.com")), SSHOption::Port(22)],
     /// );
     /// ```
-    pub fn parse_opt(line: &str) -> Result<Option<SSHOption>, Error> {
-        let mut args = Args(tokens(line));
+    pub fn parse_opt<S>(line: S) -> Result<Option<SSHOption>, Error>
+    where
+        S: AsRef<str>,
+    {
+        let mut args = Args(tokens(line.as_ref()));
         let res = match args.0.next() {
             None => Ok(None),
             Some(keyword) => Some(TryFrom::try_from((keyword?, &mut args))).transpose(),

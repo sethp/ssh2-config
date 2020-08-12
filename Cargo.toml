@@ -16,12 +16,14 @@ A configuration wrapper for ssh2-rs
 [features]
 default = ["with_libc"]
 
-with_libc = ["libc"]
+with_libc = ["libc", "tilde-expand"]
 
 [dependencies]
 ssh2 = "0.8.1"
 itertools = "0.9.0"
 libc = { version = "0.2", optional = true }
+tilde-expand = { version = "0.1.1", optional = true }
+glob = "0.3.0"
 
 [dev-dependencies]
 tempfile = "3.1.0"
