@@ -85,7 +85,7 @@ impl std::default::Default for SSHConfig {
 /// FileError is an error tied to a particular place in a file
 #[derive(Debug)]
 pub struct FileError {
-    /// filename is the name of the file where the error occurred
+    /// filename is the path of the file where the error occurred, or "" (if the path is not unicode)
     pub filename: String,
     /// lineno is the line number within the file, or 0
     pub lineno: usize,
