@@ -28,9 +28,10 @@ pub enum SSHOption {
     Foo { five: u8 },
 }
 
+#[derive(Debug, PartialEq, Eq)]
 struct Opt<T>
 where
-    T: Kind,
+    T: Kind + Eq,
 {
     kind: T,
     data: T::Data,
@@ -44,10 +45,37 @@ trait Kind {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct Magic<T: 'static> {
+    __marker: std::marker::PhantomData<&'static T>,
+}
+
+const USER: Magic<User2> = Magic {
+    __marker: std::marker::PhantomData,
+};
+const SENDENV: Magic<SendEnv2> = Magic {
+    __marker: std::marker::PhantomData,
+};
+
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct User2;
 
 impl Kind for User2 {
     type Data = String;
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct SendEnv2;
+
+impl Kind for SendEnv2 {
+    type Data = Vec<Env>;
+
+    fn merge(a: Self::Data, b: Self::Data) -> Self::Data {
+        let mut both = vec![];
+        both.extend(a);
+        both.extend(b);
+        both
+    }
 }
 
 #[test]
@@ -57,7 +85,17 @@ fn foob() {
         data: String::from("hi"),
     };
 
-    // panic!
+    let bar = Opt::<SendEnv2> {
+        kind: SendEnv2,
+        data: vec![Env::Send(String::from("hi"))],
+    };
+
+    use std::collections::HashMap;
+    let mut map: HashMap<_, _> = HashMap::new();
+    assert!(map.insert(USER, foo).is_none());
+    assert!(map.insert(SENDENV, bar).is_none());
+
+    panic!("{:?}", map);
 }
 
 // enum Kind {
@@ -92,11 +130,6 @@ impl Merge for SSHOption {
             (_, _) => todo!(),
         }
     }
-}
-
-fn merge_tuple(a: SSHOption, b: SSHOption) -> (SSHOption, SSHOption) {
-    // TODO: override for other shit
-    (a, b)
 }
 
 impl Merge for User {}
