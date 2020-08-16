@@ -476,7 +476,7 @@ impl<'a> Args<'a> {
     }
 
     /// has_next returns true if there is at least one more argument.
-    fn has_next(self: &mut Self) -> bool {
+    fn has_next(&mut self) -> bool {
         if let Some(next) = self.0.next() {
             self.0.put_back(next);
             true
@@ -489,7 +489,7 @@ impl<'a> Args<'a> {
 impl<'a> Iterator for Args<'a> {
     type Item = Result<String, Error>;
 
-    fn next(self: &mut Self) -> Option<Self::Item> {
+    fn next(&mut self) -> Option<Self::Item> {
         match self.map_owned(std::convert::identity) {
             Err(Error::MissingArgument) => None,
             res => Some(res),
@@ -499,7 +499,7 @@ impl<'a> Iterator for Args<'a> {
 
 impl<'a> Arguments for Args<'a> {
     // comparable to strdelim
-    fn map_next<T, F>(self: &mut Self, f: F) -> Result<T, Error>
+    fn map_next<T, F>(&mut self, f: F) -> Result<T, Error>
     where
         F: FnOnce(&str, &mut Self) -> Result<T, Error>,
     {
@@ -548,12 +548,12 @@ impl<'a> Arguments for Args<'a> {
 /// - `Args`
 pub trait Arguments: Iterator<Item = Result<String, Error>> {
     /// map_next provides access to the next argument and subsequent arguments
-    fn map_next<T, F>(self: &mut Self, f: F) -> Result<T, Error>
+    fn map_next<T, F>(&mut self, f: F) -> Result<T, Error>
     where
         F: FnOnce(&str, &mut Self) -> Result<T, Error>;
 
     /// map_one provides access to a owned copy of the next argument
-    fn map_owned<T, F>(self: &mut Self, f: F) -> Result<T, Error>
+    fn map_owned<T, F>(&mut self, f: F) -> Result<T, Error>
     where
         F: FnOnce(String) -> T,
     {
@@ -1035,13 +1035,13 @@ pub mod simple {
     impl<'a> Iterator for Args<'a> {
         type Item = Result<String, Error>;
 
-        fn next(self: &mut Self) -> Option<Self::Item> {
+        fn next(&mut self) -> Option<Self::Item> {
             Some(self.0.next()?.map(str::to_owned))
         }
     }
 
     impl<'a> Arguments for Args<'a> {
-        fn map_next<T, F>(self: &mut Self, f: F) -> Result<T, Error>
+        fn map_next<T, F>(&mut self, f: F) -> Result<T, Error>
         where
             F: FnOnce(&str, &mut Self) -> Result<T, Error>,
         {
