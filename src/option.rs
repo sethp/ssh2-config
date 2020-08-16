@@ -12,25 +12,133 @@ use std::str::MatchIndices;
 /// For details on the individual meaning of these options, see [ssh_config(5)][0].
 ///
 /// [0]: https://man.openbsd.org/OpenBSD-current/man5/ssh_config.5
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 #[allow(missing_docs)]
 #[non_exhaustive]
-// TODO: OsString for paths & env vars?
+// TODO: OsString for env vars?
 pub enum SSHOption {
-    User(String),
+    User(User),
     Port(u16),
     Hostname(String),
 
     Host(String),
-    SendEnv(Vec<Env>),
+    SendEnv(SendEnv),
     Include(Include),
+    // IdentityFile(String)
+    Foo { five: u8 },
+}
+
+struct Opt<T>
+where
+    T: Kind,
+{
+    kind: T,
+    data: T::Data,
+}
+
+trait Kind {
+    type Data;
+
+    fn merge(a: Self::Data, _b: Self::Data) -> Self::Data {
+        a
+    }
+}
+
+struct User2;
+
+impl Kind for User2 {
+    type Data = String;
+}
+
+#[test]
+fn foob() {
+    let foo = Opt::<User2> {
+        kind: User2,
+        data: String::from("hi"),
+    };
+
+    // panic!
+}
+
+// enum Kind {
+//     User,
+//     Port,
+//     Hostname,
+// };
+
+type User = String;
+type SendEnv = Vec<Env>;
+
+#[allow(missing_docs)]
+pub trait Merge
+where
+    Self: std::marker::Sized,
+{
+    fn merge(self: Self, _other: Self) -> Self {
+        self
+    }
+}
+
+// struct Merged<T> {
+
+// }
+
+impl Merge for SSHOption {
+    fn merge(self: Self, other: Self) -> Self {
+        match (self, other) {
+            (a @ SSHOption::User(_), SSHOption::User(_)) => a,
+            (SSHOption::User(_), _) => todo!(),
+
+            (_, _) => todo!(),
+        }
+    }
+}
+
+fn merge_tuple(a: SSHOption, b: SSHOption) -> (SSHOption, SSHOption) {
+    // TODO: override for other shit
+    (a, b)
+}
+
+impl Merge for User {}
+
+// impl Merge for SendEnv {
+//     fn merge(a: SendEnv, b: SendEnv) -> SendEnv {
+//         // a.into_iter().concat(b.into_iter()).collect()
+//         let mut both = vec![];
+//         both.extend(a);
+//         both.extend(b);
+//         both
+//     }
+// }
+
+// fn merge_two_variants<T: variant_of_ssh_option>(a: T, b: T) {
+
+// }
+
+#[allow(dead_code)]
+mod experiment {
+    use super::*;
+    fn merge_two_sendenvs(mut a: SendEnv, b: SendEnv) -> SendEnv {
+        a.extend(b);
+        a
+    }
+
+    fn merge_two_users(a: User, _b: User) -> User {
+        a
+    }
+
+    // TODO: this is a problem, maybe
+    type TODO = ();
+    fn merge_two_includes(_a: Include, _b: Include) -> TODO {
+        todo!()
+    }
 }
 
 /// Env represents an environment variable pattern for the `SendEnv` directive.
 ///
 /// SendEnv may either express a positive or negative pattern to send along or
 /// stop the sending of a variable respectively.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Env {
     /// Send is a positive pattern: "send along matching env vars"
     Send(String),
@@ -41,7 +149,7 @@ pub enum Env {
 /// Include represents the nested config structure provided by an include directive.
 ///
 /// We preserve the nested structure in order to handle nested Host/Match states.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Include {
     /// Paths is a list of file patterns to include.
     Paths(Vec<String>),

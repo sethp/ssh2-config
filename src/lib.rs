@@ -3,8 +3,8 @@
 //! use ssh2_config::SSHConfig;
 //!
 //! // Retrieve config for local SSH server
-//! let sess = SSHConfig::for_host("127.0.0.1")
-//!                 .with_config_file("/path/to/ssh/config") // equivalent to OpenSSH's `-F`
+//! let sess = SSHConfig::from_file("/path/to/ssh/config") // equivalent to OpenSSH's `-F`
+//!                 .for_host("127.0.0.1")
 //!                 .connect_with_auth();
 //!
 //! // Make sure we're authenticated
@@ -217,6 +217,8 @@ impl SSHConfig {
         let mut config = vec![];
 
         for path in paths {
+            // TODO: we need to track the "file" boundary, since every
+            // file starts off as matching everything
             config.extend(readconf_depth(
                 &path,
                 ReadMeta {
@@ -234,8 +236,30 @@ impl SSHConfig {
         Ok(Self(config))
     }
 
-    pub fn for_host(_: &str) -> Self {
-        unimplemented!()
+    pub fn for_host(self: &Self, host: &str) -> Self {
+        fn host_matches(h1: &str, h2: &str) -> bool {
+            h1 == h2 || h1 == "*" || h2 == "*"
+        }
+
+        let mut last_host = None;
+        return Self(
+            self.0
+                .iter()
+                .filter(|opt| match opt {
+                    SSHOption::Host(h) => {
+                        last_host = Some(h);
+                        false
+                    }
+                    _ => last_host.map(|h| host_matches(h, host)).unwrap_or(true),
+                })
+                .map(|opt| opt.clone())
+                .collect(),
+        );
+
+        // HashMap<std::mem::Discriminant<SSHOption>, SSHOption>
+        // 1. Get me all the IdentityFile directives
+        // 2. insert-or-merge
+        // 3. Iterate over every option and "apply" it to an ssh session
     }
 
     pub fn with_config_file(self: &Self, _: &str) -> Self {
@@ -455,5 +479,77 @@ mod test {
             std::mem::discriminant(&err),
             std::mem::discriminant(&super::Error::MaxDepthExceeded),
         )
+    }
+
+    #[test]
+    fn config_matching() {
+        use SSHOption::*;
+        let cfg = SSHConfig(vec![
+            Host(String::from("example.com")),
+            User(String::from("example_ssh_user")),
+            Host(String::from("*")),
+            User(String::from("ssh_user")),
+        ]);
+
+        assert_eq!(
+            cfg.for_host("127.0.0.1").0,
+            vec![User(String::from("ssh_user"))]
+        );
+        assert_eq!(
+            cfg.for_host("example.com").0,
+            vec![User(String::from("example_ssh_user"))]
+        );
+    }
+
+    #[test]
+    fn whatsup() {
+        use std::collections::HashMap;
+
+        let input = vec![
+            SSHOption::User(String::from("seth")),
+            SSHOption::Port(16),
+            SSHOption::User(String::from("eric")),
+        ];
+
+        let mut mapping: HashMap<std::mem::Discriminant<SSHOption>, SSHOption> = Default::default();
+
+        for opt in input {
+            use option::Merge;
+            let k = std::mem::discriminant(&opt);
+
+            if let Some(last) = mapping.insert(k, opt) {
+                let opt = mapping.remove(&k).unwrap();
+                let merged = last.merge(opt);
+                assert!(mapping.insert(k, merged).is_none());
+            }
+        }
+
+        // do something
+        if true {
+            panic!("{:?}", mapping);
+        }
+
+        // mapping[std::mem::discriminant(&SendEnv(vec![]))]
+
+        // mapping[option::Kind::Port]
+
+        let output = Vec::<SSHOption>::new();
+        assert_eq!(
+            output,
+            vec![SSHOption::User(String::from("seth")), SSHOption::Port(16),]
+        );
+
+        let mut mapping: HashMap<std::mem::Discriminant<SSHOption>, SSHOption> = Default::default();
+
+        assert!(mapping
+            .insert(
+                std::mem::discriminant(&SSHOption::User(String::from("this is ignored"))),
+                SSHOption::User(String::from("seth")),
+            )
+            .is_none());
+
+        // mapping.insert()
+
+        panic!("{:?}", mapping)
     }
 }
